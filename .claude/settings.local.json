@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp -r ~/Desktop/tweetbot/ ~/Desktop/tweetbot_backup_20260505/)",
+      "Read(//Users/hch7/Desktop/**)",
+      "Bash(gcloud compute ssh instance-20260504-131826 *)",
+      "Bash(gcloud compute scp *)"
+    ]
+  }
+}
