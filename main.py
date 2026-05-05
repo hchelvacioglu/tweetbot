@@ -45,6 +45,9 @@ ENGAGEMENT_INTERVAL_MIN = int(os.getenv("ENGAGEMENT_INTERVAL_MIN", 60))
 AI_BATCH_SIZE = int(os.getenv("AI_BATCH_SIZE", 5))  # Faz 2: 10 → 5 (truncation çözümü)
 
 _ai_quota_blocked_until = None
+# AI'ın ATLA dediği tweet hash'leri — aynı tweet'i tekrar AI'a yollamayalım
+_atlanan_hashes = set()
+_ATLANAN_CACHE_MAX_SIZE = 5000  # cache max boyut, dolduğunda sıfırla
 
 # ============================================================
 # Yardımcılar
@@ -185,7 +188,7 @@ def publisher_job():
 # ============================================================
 
 def twitter_collector_job():
-    global _ai_quota_blocked_until
+    global _ai_quota_blocked_until, _atlanan_hashes
 
     if not TWITTER_LIST_ID:
         logger.warning("[Collector] TWITTER_LIST_ID yok, atlandı.")
@@ -196,7 +199,7 @@ def twitter_collector_job():
         logger.info(f"[Collector] AI kotası kilitli, {remaining:.0f} dk sonra tekrar denenecek.")
         return
 
-    logger.info("[Collector] Başlıyor...")
+    logger.info(f"[Collector] Başlıyor... (ATLA cache: {len(_atlanan_hashes)} hash)")
     recent_titles = database.get_recent_news_titles(hours=12)
 
     tweets = twitter_manager.get_list_tweets(TWITTER_LIST_ID, count=60)
@@ -233,6 +236,12 @@ def twitter_collector_job():
             continue
 
         if database.hash_exists(text):
+            skipped_dup += 1
+            continue
+
+        # AI cache: bu tweet'i daha önce AI ATLA demişse tekrar yollama
+        text_hash = database.make_hash(text)
+        if text_hash in _atlanan_hashes:
             skipped_dup += 1
             continue
 
@@ -307,6 +316,16 @@ def twitter_collector_job():
             continue
 
         title_to_item = {item['title']: item for item in batch}
+
+        # AI ATLA dediklerini cache'e ekle (gelecek döngülerde tekrar AI'a gitmesin)
+        processed_titles = {res['title'] for res in results}
+        for item in batch:
+            if item['title'] not in processed_titles:
+                _atlanan_hashes.add(database.make_hash(item['title']))
+        # Cache çok büyüdüyse temizle (en eski hash'ler kaybolur, kabul edilebilir)
+        if len(_atlanan_hashes) > _ATLANAN_CACHE_MAX_SIZE:
+            logger.info(f"[Collector] ATLA cache {_ATLANAN_CACHE_MAX_SIZE} aşıldı, sıfırlanıyor")
+            _atlanan_hashes.clear()
 
         for res in results:
             original_item = title_to_item.get(res['title'])
