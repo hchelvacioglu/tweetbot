@@ -20,6 +20,36 @@ from typing import List, Dict
 logger = logging.getLogger(__name__)
 
 # ============================================================
+# Etiket Validation
+# ============================================================
+
+_VALID_CATEGORIES = ('Transfer', 'Maç', 'Hakem', 'Yönetim', 'Açıklama', 'Sakatlık', 'Gündem')
+_VALID_TEAMS = ('GS', 'FB', 'BJK', 'TS', 'TR')
+
+def _validate_etiket(etiket: str) -> str:
+    """Etiket formatını doğrular. Geçersizse '📌 Gündem | TR' döner."""
+    if not etiket:
+        return "📌 Gündem | TR"
+    if '|' not in etiket:
+        return "📌 Gündem | TR"
+    parts = etiket.split('|', 1)
+    if len(parts) != 2:
+        return "📌 Gündem | TR"
+    left = parts[0].strip()
+    right = parts[1].strip()
+    # Sol taraf emoji ile başlamalı (ASCII değil)
+    if not left or left[0].isascii():
+        return "📌 Gündem | TR"
+    if not any(cat in left for cat in _VALID_CATEGORIES):
+        return "📌 Gündem | TR"
+    teams_in_right = [t.strip() for t in right.split('-')]
+    if not teams_in_right or not all(t in _VALID_TEAMS for t in teams_in_right):
+        return "📌 Gündem | TR"
+    if len(etiket) > 60:
+        return "📌 Gündem | TR"
+    return etiket
+
+# ============================================================
 # Provider seçimi
 # ============================================================
 AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()
@@ -174,20 +204,40 @@ TWEET FORMATI:
 - Emoji EKLEME (zaten varsa koruyabilirsin).
 - Tweet TÜRKÇE olsun.
 
-==================== ETİKET KURALLARI ====================
-Her PAYLAS kararı için 'etiket' alanı da üret. Bu, quote tweet üst metni olarak kullanılacak.
-Format: "EMOJI Kategori | Takım"
-Kategoriler:
-- 📰 Transfer (transfer haberi/dedikodusu)
-- ⚽ Maç (maç öncesi/sonrası, kadro, sonuç, taktik)
-- 🟨 Hakem (hakem atamaları, VAR)
-- 🏛️ Yönetim (başkan, transfer komitesi, mali, kongre)
-- 🎙️ Açıklama (basın toplantısı, demeç, röportaj)
-- 🩹 Sakatlık (sakatlık, sağlık)
-- 📌 Genel (yukarıdakilere uymayan, futbolcu özel hayat vs)
+==================== ETİKET KURALLARI (ZORUNLU FORMAT) ====================
+Her PAYLAS kararı için 'etiket' alanı ZORUNLU. Bu alan quote tweet'in üst metni olur.
 
-Takım kısaltmaları: GS, FB, BJK, TS. Birden fazlaysa "GS-FB" gibi.
-Örnekler: "📰 Transfer | GS", "🎙️ Açıklama | FB", "⚽ Maç | BJK-GS", "🏛️ Yönetim | FB"
+KESİN FORMAT (asla başka format kullanma):
+"<EMOJI> <KATEGORI> | <TAKIM>"
+
+Sadece şu 7 kategoriden BİRİNİ seç:
+- 📰 Transfer    (transfer, kiralık, sözleşme, ayrılık)
+- ⚽ Maç         (maç öncesi, sonucu, kadro, taktik, hazırlık)
+- 🟨 Hakem       (hakem ataması, VAR, kart, ceza)
+- 🏛️ Yönetim    (başkan, transfer komitesi, mali, kongre, açıklama)
+- 🎙️ Açıklama   (basın toplantısı, demeç, röportaj, sosyal medya çıkışı)
+- 🩹 Sakatlık    (sakatlık, sağlık raporu, ameliyat)
+- 📌 Gündem      (yukarıdakilere uymayanlar — son çare)
+
+Sadece şu 4 takım kısaltmasını kullan: GS, FB, BJK, TS
+Birden fazlaysa tire ile ayır: GS-FB, BJK-TS
+Genel haberse: TR
+
+DOĞRU ÖRNEKLER:
+✓ "📰 Transfer | GS"
+✓ "🎙️ Açıklama | FB"
+✓ "⚽ Maç | BJK-GS"
+✓ "🏛️ Yönetim | FB"
+✓ "🩹 Sakatlık | TS"
+✓ "📌 Gündem | TR"
+
+YANLIŞ ÖRNEKLER (ASLA YAZMA):
+✗ "🌱 Zemin, kupaya müsait"      (kategori yok, takım yok)
+✗ "Galatasaray transfer haberi"   (emoji yok)
+✗ "📰 GS"                          (kategori adı yok)
+✗ "Transfer | GS"                  (emoji yok)
+
+KURAL: Etiket alanına yaratıcı cümle, açıklama veya orijinal tweet metni KOYMA. Sadece yukarıdaki 6+1 format kalıbından birini kullan.
 
 ==================== MÜKERRER KONTROLÜ ====================
 Aşağıdakilerle aynı konuyu işleyen yeni haberi ATLA:
@@ -279,8 +329,7 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
             etiket = (res.get("etiket") or "").strip()
             if not tweet_text:
                 continue
-            if not etiket:
-                etiket = "📌 Gündem"
+            etiket = _validate_etiket(etiket)
             item = news_items[idx]
             processed.append({
                 "title": item['title'],
