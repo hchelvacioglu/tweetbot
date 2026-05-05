@@ -178,6 +178,9 @@ ATLA olarak işaretle:
 5) İÇERİĞİ BOŞ CLICKBAIT: "Yıldız isim", "O futbolcu", "Bomba isim" gibi somut bilgi (isim/olay) içermeyen başlıklar ATLA.
    İSTİSNA: Detay metninde net isim varsa, tweet'e o ismi koyarak PAYLAŞ.
 
+6) SAF EĞLENCE / SELAMLAŞMA: "İyi sabahlar Cimbomlular", "Hadi BJK", "Günaydın Trabzonlular" gibi tek satırlık taraftarlık paylaşımları, mood paylaşımları, takım renkleriyle yapılan emojili coşku tweet'leri ATLA. Somut bilgi, isim, olay yoksa atla.
+   İSTİSNA: Futbolcunun KENDİ sosyal medya çıkışı veya açıklaması varsa PAYLAŞ.
+
 ==================== PAYLAŞ KURALLARI (GENİŞ FİLTRE) ====================
 ŞUNLARIN HEPSİ PAYLAŞILABILIR (4 büyüklerle ilgili olmak şartıyla):
 - Transfer ve transfer dedikoduları

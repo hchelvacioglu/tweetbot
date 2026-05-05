@@ -83,6 +83,42 @@ def is_quote_of_quote(tweet: dict) -> bool:
     qt = tweet.get('quoted_tweet')
     return qt is not None and isinstance(qt, dict) and bool(qt)
 
+def get_rate_threshold(followers: int) -> float:
+    if followers < 10_000:
+        return 0.003
+    if followers < 100_000:
+        return 0.002
+    if followers < 500_000:
+        return 0.001
+    return 0.0005
+
+def should_collect(tweet: dict) -> tuple:
+    likes = tweet.get('likeCount', 0) or 0
+    retweets = tweet.get('retweetCount', 0) or 0
+    replies = tweet.get('replyCount', 0) or 0
+    author = tweet.get('author') or {}
+    followers = author.get('followers', 0) or 0
+
+    if likes < 15:
+        return (False, "low_likes")
+
+    rt_ratio = retweets / likes if likes > 0 else 0
+    reply_ratio = replies / likes if likes > 0 else 0
+    if rt_ratio < 0.01 and reply_ratio < 0.10:
+        return (False, "no_news_signal")
+
+    if followers > 0:
+        rate = likes / followers
+        threshold = get_rate_threshold(followers)
+        if rate >= threshold:
+            return (True, "engagement_rate")
+
+    interest = (retweets * 3 + replies) / likes if likes > 0 else 0
+    if interest >= 0.15:
+        return (True, "interest_score")
+
+    return (False, "low_quality")
+
 # ============================================================
 # Publisher
 # ============================================================
@@ -152,7 +188,9 @@ def twitter_collector_job():
         return
 
     pending_items = []
-    skipped_likes = 0
+    skipped_low_likes = 0
+    skipped_no_signal = 0
+    skipped_low_quality = 0
     skipped_age = 0
     skipped_dup = 0
     media_count = 0
@@ -163,13 +201,18 @@ def twitter_collector_job():
         if not text:
             continue
 
-        likes = tweet.get('likeCount', 0)
-        if likes < MIN_LIKES:
-            skipped_likes += 1
-            continue
-
         if is_too_old(tweet.get('createdAt')):
             skipped_age += 1
+            continue
+
+        passes, reason = should_collect(tweet)
+        if not passes:
+            if reason == "low_likes":
+                skipped_low_likes += 1
+            elif reason == "no_news_signal":
+                skipped_no_signal += 1
+            elif reason == "low_quality":
+                skipped_low_quality += 1
             continue
 
         if database.hash_exists(text):
@@ -184,6 +227,11 @@ def twitter_collector_job():
         if is_qoq:
             quote_skip_count += 1
 
+        followers = (tweet.get('author') or {}).get('followers', 0) or 0
+        likes = tweet.get('likeCount', 0) or 0
+        retweets = tweet.get('retweetCount', 0) or 0
+        replies = tweet.get('replyCount', 0) or 0
+
         username = tweet.get('userName', '') or ''
         tweet_url = tweet.get('url', '') or ''
         if not username and tweet_url:
@@ -191,6 +239,11 @@ def twitter_collector_job():
             if len(parts) >= 4 and parts[-2] == 'status':
                 username = parts[-3]
         source = f"@{username}" if username else ""
+
+        logger.info(
+            f"[Collector]   ✓ Aday: @{username} (followers: {followers}, "
+            f"likes: {likes}, rt: {retweets}, reply: {replies}, reason: {reason})"
+        )
 
         pending_items.append({
             "title": text,
@@ -203,9 +256,9 @@ def twitter_collector_job():
         })
 
     logger.info(
-        f"[Collector] Filtreleme: {len(tweets)} tweet → "
-        f"{len(pending_items)} aday "
-        f"(düşük beğeni: {skipped_likes}, eski: {skipped_age}, mükerrer: {skipped_dup}, "
+        f"[Collector] Filtreleme: {len(tweets)} tweet → {len(pending_items)} aday "
+        f"(düşük beğeni: {skipped_low_likes}, eğlence: {skipped_no_signal}, "
+        f"düşük kalite: {skipped_low_quality}, eski: {skipped_age}, mükerrer: {skipped_dup}, "
         f"medya: {media_count}, q-of-q skip: {quote_skip_count})"
     )
 
@@ -332,7 +385,7 @@ if __name__ == "__main__":
     logger.info("X Sports News Bot başlatılıyor (Faz 3 — Quote Tweet)...")
     logger.info(f"AI Provider: {ai_manager.AI_PROVIDER}")
     logger.info(f"List ID: {TWITTER_LIST_ID}")
-    logger.info(f"Min Likes: {MIN_LIKES} | Max Age: {MAX_TWEET_AGE_HOURS}h | AI Batch: {AI_BATCH_SIZE}")
+    logger.info(f"Filtre: Akıllı (engagement rate + RT ratio) | Max Age: {MAX_TWEET_AGE_HOURS}h | AI Batch: {AI_BATCH_SIZE}")
     logger.info(f"Collector: her {COLLECTOR_INTERVAL_MIN}dk | Publisher: her {PUBLISHER_INTERVAL_MIN}dk | Engagement: her {ENGAGEMENT_INTERVAL_MIN}dk")
     logger.info("=" * 60)
 
