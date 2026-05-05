@@ -43,7 +43,7 @@ DB_SIZE=$(stat -c%s "$LOCAL_TMP")
 log "Lokal yedek alındı: $LOCAL_TMP ($DB_SIZE bytes)"
 
 # GCS'ye yükle
-gsutil -q cp "$LOCAL_TMP" "gs://${BUCKET_NAME}/${BACKUP_NAME}" || {
+gcloud storage cp "$LOCAL_TMP" "gs://${BUCKET_NAME}/${BACKUP_NAME}" --quiet || {
     log "HATA: GCS upload başarısız."
     rm -f "$LOCAL_TMP"
     exit 3
