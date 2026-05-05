@@ -1,14 +1,11 @@
 """
-main.py — Faz 1 Güncellemesi
+main.py — Faz 2 Güncellemesi
 ============================
-Düzeltmeler:
-- Tarih parser düzeltildi: GetXAPI Twitter formatını (`Fri May 01 12:37:29 +0000 2026`) artık doğru parse ediyor
-- Publisher: tweet fail olunca attempt_count artırılıyor, MAX_ATTEMPTS sonra Basarisiz oluyor
-- Publisher: aynı tweet'i sonsuza kadar denememe garantisi
-- Collector: AIQuotaExceeded yakalanıyor — kota dolarsa o döngü atlanır, sıradaki saatte tekrar denenir
-- DB hash ile dedup: AI'dan ÖNCE hash kontrolü, gereksiz AI çağrısı engelleniyor
-- Eski RSS / feedparser / email.utils kalıntıları temizlendi
-- Çift initial run kaldırıldı
+Faz 1'e ek olarak:
+- Publisher artık post_tweet'in döndürdüğü Twitter ID'yi DB'ye kaydediyor (engagement için kritik)
+- Yeni: engagement_tracker_job() — saatte bir, son 24h'de paylaşılmış tweetlerin metric'lerini çeker
+- Yeni schedule: engagement her saat başı çalışır
+- Eski 'Paylasildi' status'u korundu (geri uyumluluk için)
 """
 
 import os
@@ -44,8 +41,9 @@ MIN_LIKES = int(os.getenv("MIN_LIKES", 40))
 MAX_TWEET_AGE_HOURS = float(os.getenv("MAX_TWEET_AGE_HOURS", 3))
 COLLECTOR_INTERVAL_MIN = int(os.getenv("COLLECTOR_INTERVAL_MIN", 15))
 PUBLISHER_INTERVAL_MIN = int(os.getenv("PUBLISHER_INTERVAL_MIN", 3))
+ENGAGEMENT_INTERVAL_MIN = int(os.getenv("ENGAGEMENT_INTERVAL_MIN", 60))
+AI_BATCH_SIZE = int(os.getenv("AI_BATCH_SIZE", 5))  # Faz 2: 10 → 5 (truncation çözümü)
 
-# AI quota dolduğunda bu zamana kadar collector'ı atla
 _ai_quota_blocked_until = None
 
 # ============================================================
@@ -53,23 +51,15 @@ _ai_quota_blocked_until = None
 # ============================================================
 
 def is_night_time() -> bool:
-    """Yerel saat 03:00 - 07:00 arası mı?"""
     return 3 <= datetime.datetime.now().hour < 7
 
 def parse_tweet_date(date_str: str):
-    """
-    GetXAPI Twitter formatını parse eder.
-    Örn: 'Fri May 01 12:37:29 +0000 2026' veya ISO format.
-    Başarısızsa None döner.
-    """
     if not date_str:
         return None
-    # Önce Twitter formatını dene (RFC 2822 benzeri)
     try:
         return parsedate_to_datetime(date_str)
     except (TypeError, ValueError):
         pass
-    # ISO formatını dene
     try:
         return datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
     except (TypeError, ValueError):
@@ -77,10 +67,9 @@ def parse_tweet_date(date_str: str):
     return None
 
 def is_too_old(date_str: str) -> bool:
-    """Tweet MAX_TWEET_AGE_HOURS'tan eski mi?"""
     dt = parse_tweet_date(date_str)
     if not dt:
-        return False  # Parse edemediysek atlamayalım, AI bakar
+        return False
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     age = datetime.datetime.now(datetime.timezone.utc) - dt
@@ -91,7 +80,6 @@ def is_too_old(date_str: str) -> bool:
 # ============================================================
 
 def publisher_job():
-    """En eski bekleyen tweet'i atar. Fail olursa attempt_count'u artırır."""
     if is_night_time():
         logger.info("[Publisher] Gece modu (03-07), atlandı.")
         return
@@ -103,20 +91,26 @@ def publisher_job():
     tweet_id = tweet['id']
     tweet_content_str = tweet['tweet_content']
 
-    # Thread mi tek tweet mi?
     try:
         content_to_post = json.loads(tweet_content_str)
     except (json.JSONDecodeError, TypeError):
         content_to_post = tweet_content_str
 
     if isinstance(content_to_post, list):
-        success = twitter_manager.post_thread(content_to_post)
+        result = twitter_manager.post_thread(content_to_post)
     else:
-        success = twitter_manager.post_tweet(content_to_post)
+        result = twitter_manager.post_tweet(content_to_post)
 
-    if success:
-        database.update_tweet_status(tweet_id, 'Paylasildi')
-        logger.info(f"[Publisher] ✓ ID {tweet_id} paylaşıldı.")
+    # result: ya str (tweet ID) ya True ya False
+    if result:
+        if isinstance(result, str) and result:
+            # Tweet ID ile kaydet → engagement tracker buradan başlar
+            database.save_posted_tweet_id(tweet_id, result)
+            logger.info(f"[Publisher] ✓ ID {tweet_id} paylaşıldı (Twitter ID: {result}).")
+        else:
+            # ID alınamadı, sadece status güncelle (eski davranış, engagement yapılmayacak)
+            database.update_tweet_status(tweet_id, 'Paylasildi')
+            logger.warning(f"[Publisher] ✓ ID {tweet_id} paylaşıldı ama Twitter ID alınamadı.")
     else:
         database.increment_attempt(tweet_id)
         logger.warning(f"[Publisher] ✗ ID {tweet_id} fail. Attempt sayacı artırıldı.")
@@ -126,14 +120,12 @@ def publisher_job():
 # ============================================================
 
 def twitter_collector_job():
-    """Twitter listesini tarar, AI ile filtreler, kuyruğa ekler."""
     global _ai_quota_blocked_until
 
     if not TWITTER_LIST_ID:
         logger.warning("[Collector] TWITTER_LIST_ID yok, atlandı.")
         return
 
-    # AI kotası dolduysa belirli süre boyunca atla
     if _ai_quota_blocked_until and datetime.datetime.now() < _ai_quota_blocked_until:
         remaining = (_ai_quota_blocked_until - datetime.datetime.now()).total_seconds() / 60
         logger.info(f"[Collector] AI kotası kilitli, {remaining:.0f} dk sonra tekrar denenecek.")
@@ -157,23 +149,19 @@ def twitter_collector_job():
         if not text:
             continue
 
-        # Min beğeni
         likes = tweet.get('likeCount', 0)
         if likes < MIN_LIKES:
             skipped_likes += 1
             continue
 
-        # Tazelik
         if is_too_old(tweet.get('createdAt')):
             skipped_age += 1
             continue
 
-        # DB hash dedup (AI'dan önce, ücretsiz)
         if database.hash_exists(text):
             skipped_dup += 1
             continue
 
-        # userName yoksa URL'den çıkarmayı dene, o da olmazsa boş bırak
         username = tweet.get('userName', '') or ''
         if not username:
             url = tweet.get('url', '')
@@ -199,14 +187,13 @@ def twitter_collector_job():
     if not pending_items:
         return
 
-    # AI ile batch işle
     saved_count = 0
-    for i in range(0, len(pending_items), 10):
-        batch = pending_items[i:i+10]
+    # Faz 2: batch size 10 → 5 (configurable via env)
+    for i in range(0, len(pending_items), AI_BATCH_SIZE):
+        batch = pending_items[i:i + AI_BATCH_SIZE]
         try:
             results = ai_manager.process_news_batch(batch, recent_titles)
         except ai_manager.AIQuotaExceeded:
-            # Kota doldu, 1 saat boyunca collector'ı dondur
             _ai_quota_blocked_until = datetime.datetime.now() + datetime.timedelta(hours=1)
             logger.error("[Collector] AI kotası doldu! Collector 1 saat dondurulacak.")
             break
@@ -223,11 +210,63 @@ def twitter_collector_job():
                 recent_titles.append(res['title'])
                 logger.info(f"[Collector] + Kuyruğa: {res['title'][:60]}")
 
-        # Batch'ler arası kısa bekleme (rate limit nazikçe)
-        if i + 10 < len(pending_items):
+        if i + AI_BATCH_SIZE < len(pending_items):
             time.sleep(5)
 
     logger.info(f"[Collector] Bitti. {saved_count} yeni tweet kuyruğa eklendi.")
+
+# ============================================================
+# Engagement Tracker (Faz 2 yeni)
+# ============================================================
+
+def engagement_tracker_job():
+    """
+    Saatte bir çalışır. Son 24h'de paylaşılmış tweetlerin engagement'ını GetXAPI ile çeker, DB'ye kaydeder.
+    Her tweet için 3 snapshot tutulur: 1h, 6h, 24h.
+    """
+    pending_checks = database.get_pending_engagement_checks()
+    if not pending_checks:
+        logger.info("[Engagement] Ölçülecek snapshot yok.")
+        return
+    
+    logger.info(f"[Engagement] {len(pending_checks)} snapshot ölçülecek.")
+    
+    success_count = 0
+    fail_count = 0
+    
+    for check in pending_checks:
+        tweet_id = check['tweet_id']
+        posted_tweet_id = check['posted_tweet_id']
+        snapshot = check['snapshot']
+        
+        metrics = twitter_manager.get_tweet_metrics(posted_tweet_id)
+        if metrics is None:
+            fail_count += 1
+            logger.warning(f"[Engagement] Tweet {posted_tweet_id} metric alınamadı (snapshot {snapshot}).")
+            continue
+        
+        try:
+            database.update_engagement(
+                tweet_id=tweet_id,
+                snapshot=snapshot,
+                likes=metrics['likes'],
+                retweets=metrics['retweets'],
+                replies=metrics['replies'],
+                views=metrics['views']
+            )
+            success_count += 1
+            logger.info(
+                f"[Engagement] Tweet {tweet_id} ({snapshot}): "
+                f"{metrics['likes']}❤ {metrics['retweets']}🔁 {metrics['replies']}💬 {metrics['views']}👁"
+            )
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"[Engagement] DB update hatası tweet {tweet_id}: {e}")
+        
+        # GetXAPI rate limiting nazikçe
+        time.sleep(1)
+    
+    logger.info(f"[Engagement] Bitti. ✓ {success_count} | ✗ {fail_count}")
 
 # ============================================================
 # Main
@@ -235,19 +274,19 @@ def twitter_collector_job():
 
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("X Sports News Bot başlatılıyor...")
+    logger.info("X Sports News Bot başlatılıyor (Faz 2)...")
     logger.info(f"AI Provider: {ai_manager.AI_PROVIDER}")
     logger.info(f"List ID: {TWITTER_LIST_ID}")
-    logger.info(f"Min Likes: {MIN_LIKES} | Max Age: {MAX_TWEET_AGE_HOURS}h")
-    logger.info(f"Collector: her {COLLECTOR_INTERVAL_MIN}dk | Publisher: her {PUBLISHER_INTERVAL_MIN}dk")
+    logger.info(f"Min Likes: {MIN_LIKES} | Max Age: {MAX_TWEET_AGE_HOURS}h | AI Batch: {AI_BATCH_SIZE}")
+    logger.info(f"Collector: her {COLLECTOR_INTERVAL_MIN}dk | Publisher: her {PUBLISHER_INTERVAL_MIN}dk | Engagement: her {ENGAGEMENT_INTERVAL_MIN}dk")
     logger.info("=" * 60)
 
     database.init_db()
 
     schedule.every(COLLECTOR_INTERVAL_MIN).minutes.do(twitter_collector_job)
     schedule.every(PUBLISHER_INTERVAL_MIN).minutes.do(publisher_job)
+    schedule.every(ENGAGEMENT_INTERVAL_MIN).minutes.do(engagement_tracker_job)
 
-    # İlk açılışta collector'ı çalıştır, publisher schedule'a bırakılsın (3 dk gap için)
     logger.info("İlk collector çağrısı...")
     twitter_collector_job()
 

@@ -1,28 +1,28 @@
 """
-database.py — Faz 1 Güncellemesi
+database.py — Faz 2 Güncellemesi
 ================================
-Yeni özellikler:
-- attempt_count: bir tweet kaç kez post edilmeye çalışıldığını sayar
-- content_hash: başlık bazlı deterministik hash, mükerrer engel
-- 'Basarisiz' status: 3 kez fail eden tweetler artık sonsuza kadar denenmez
-- Hash bazlı duplicate kontrolü: AI'ya değil, DB'ye soruyor (hız + maliyet)
+Faz 1'e ek olarak:
+- Engagement_Metrics tablosu eklendi (tweet_id ile FK ilişkisi)
+- get_recent_posted_tweets(): engagement tracker için, son 24h paylaşılmış tweetleri getirir
+- save_posted_tweet_id(): publisher tweet attıktan sonra Twitter ID'yi kaydeder
+- update_engagement(): engagement metric'lerini günceller
+- get_pending_engagement_checks(): hangi tweet'lerin hangi metric'i ölçüleceğini döner
 """
 
 import sqlite3
 import datetime
 import hashlib
 import re
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 DB_NAME = "sports_bot.db"
-MAX_ATTEMPTS = 3  # Bu kadar fail ederse 'Basarisiz' olur
+MAX_ATTEMPTS = 3
 
 # ============================================================
-# Hash Helpers
+# Hash Helpers (değişmedi)
 # ============================================================
 
 def normalize_for_hash(text: str) -> str:
-    """Türkçe karakterleri sadeleştir, küçük harf yap, fazla boşluk temizle."""
     if not text:
         return ""
     t = text.lower()
@@ -37,7 +37,6 @@ def normalize_for_hash(text: str) -> str:
     return t
 
 def make_hash(title: str) -> str:
-    """Başlıktan deterministik bir hash üret (16 karakter)."""
     norm = normalize_for_hash(title)
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
 
@@ -46,10 +45,11 @@ def make_hash(title: str) -> str:
 # ============================================================
 
 def init_db():
-    """DB'yi başlatır. Tablo yoksa oluşturur, varsa migration yapar."""
+    """DB'yi başlatır. Tüm tabloları ve migration'ları idempotent yapar."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
+    # Bekleyen tweetler (Faz 1)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS Bekleyen_Tweetler (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,38 +60,58 @@ def init_db():
             status TEXT DEFAULT 'Bekliyor',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             attempt_count INTEGER DEFAULT 0,
-            content_hash TEXT
+            content_hash TEXT,
+            posted_tweet_id TEXT,
+            posted_at DATETIME
         )
     ''')
 
-    # Mevcut tablolar için ALTER (idempotent)
+    # Eksik kolon migration'ları (idempotent)
     for col_def in [
         ("attempt_count", "INTEGER DEFAULT 0"),
         ("content_hash", "TEXT"),
+        ("posted_tweet_id", "TEXT"),
+        ("posted_at", "DATETIME"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE Bekleyen_Tweetler ADD COLUMN {col_def[0]} {col_def[1]}")
         except sqlite3.OperationalError:
-            pass  # zaten var
+            pass
 
-    # Hash için UNIQUE INDEX
+    # Hash UNIQUE INDEX
     try:
         cursor.execute("CREATE UNIQUE INDEX idx_content_hash ON Bekleyen_Tweetler(content_hash)")
     except sqlite3.OperationalError:
-        pass  # zaten var
+        pass
+
+    # Engagement Metrics (Faz 2)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Engagement_Metrics (
+            tweet_id INTEGER PRIMARY KEY,
+            posted_tweet_id TEXT NOT NULL,
+            posted_at DATETIME NOT NULL,
+            likes_1h INTEGER, retweets_1h INTEGER, replies_1h INTEGER, views_1h INTEGER,
+            likes_6h INTEGER, retweets_6h INTEGER, replies_6h INTEGER, views_6h INTEGER,
+            likes_24h INTEGER, retweets_24h INTEGER, replies_24h INTEGER, views_24h INTEGER,
+            last_checked DATETIME,
+            FOREIGN KEY (tweet_id) REFERENCES Bekleyen_Tweetler(id)
+        )
+    ''')
+
+    # Engagement aramaları için index
+    try:
+        cursor.execute("CREATE INDEX idx_engagement_posted_at ON Engagement_Metrics(posted_at)")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
 
 # ============================================================
-# Yazma
+# Yazma — Bekleyen Tweetler
 # ============================================================
 
 def add_pending_tweet(title: str, link: str, published_date: str, tweet_content: str) -> bool:
-    """
-    Yeni tweet ekler. Hash zaten varsa False döner (duplicate engel).
-    Başarılıysa True döner.
-    """
     h = make_hash(title)
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -104,13 +124,11 @@ def add_pending_tweet(title: str, link: str, published_date: str, tweet_content:
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        # UNIQUE INDEX ihlali = mükerrer
         return False
     finally:
         conn.close()
 
 def hash_exists(title: str) -> bool:
-    """Bu başlığa ait hash DB'de var mı? (eklemeden önce kontrol için)"""
     h = make_hash(title)
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -120,11 +138,10 @@ def hash_exists(title: str) -> bool:
     return result
 
 # ============================================================
-# Okuma
+# Okuma — Bekleyen Tweetler
 # ============================================================
 
 def get_oldest_pending_tweet() -> Optional[Dict]:
-    """En eski bekleyen tweet'i getirir (Basarisiz olanları atlar)."""
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -139,7 +156,6 @@ def get_oldest_pending_tweet() -> Optional[Dict]:
     return dict(row) if row else None
 
 def get_recent_news_titles(hours: int = 12) -> List[str]:
-    """Son X saatte işlenmiş tüm başlıkları getirir (status fark etmeksizin)."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     time_threshold = datetime.datetime.utcnow() - datetime.timedelta(hours=hours)
@@ -152,7 +168,6 @@ def get_recent_news_titles(hours: int = 12) -> List[str]:
     return [row[0] for row in rows]
 
 def get_pending_count() -> int:
-    """Şu an aktif bekleyen tweet sayısı."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
@@ -164,22 +179,37 @@ def get_pending_count() -> int:
     return count
 
 # ============================================================
-# Status Güncelleme
+# Status & Posted Tweet Tracking
 # ============================================================
 
 def update_tweet_status(tweet_id: int, new_status: str = 'Paylasildi'):
-    """Tweet'in statusunu günceller."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('UPDATE Bekleyen_Tweetler SET status = ? WHERE id = ?', (new_status, tweet_id))
     conn.commit()
     conn.close()
 
+def save_posted_tweet_id(tweet_id: int, posted_tweet_id: str):
+    """
+    Tweet başarıyla atıldıktan sonra Twitter'ın verdiği ID'yi ve atılma zamanını kaydeder.
+    Aynı zamanda Engagement_Metrics tablosuna ilk kaydı yaratır (metric'ler null).
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    now_iso = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute('''
+        UPDATE Bekleyen_Tweetler
+        SET status = 'Paylasildi', posted_tweet_id = ?, posted_at = ?
+        WHERE id = ?
+    ''', (posted_tweet_id, now_iso, tweet_id))
+    cursor.execute('''
+        INSERT OR IGNORE INTO Engagement_Metrics (tweet_id, posted_tweet_id, posted_at)
+        VALUES (?, ?, ?)
+    ''', (tweet_id, posted_tweet_id, now_iso))
+    conn.commit()
+    conn.close()
+
 def increment_attempt(tweet_id: int):
-    """
-    Bir post denemesi başarısız olunca attempt_count'u 1 artır.
-    MAX_ATTEMPTS'e ulaşırsa status'u otomatik 'Basarisiz' yapar.
-    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('UPDATE Bekleyen_Tweetler SET attempt_count = attempt_count + 1 WHERE id = ?', (tweet_id,))
@@ -187,5 +217,97 @@ def increment_attempt(tweet_id: int):
     row = cursor.fetchone()
     if row and row[0] >= MAX_ATTEMPTS:
         cursor.execute("UPDATE Bekleyen_Tweetler SET status = 'Basarisiz' WHERE id = ?", (tweet_id,))
+    conn.commit()
+    conn.close()
+
+# ============================================================
+# Engagement Metrics
+# ============================================================
+
+def get_pending_engagement_checks() -> List[Dict]:
+    """
+    Hangi tweet'lerin hangi snapshot'larını ölçmemiz gerektiğini döner.
+    
+    Mantık: Her tweet için 4 snapshot zamanı var: 1h, 6h, 24h.
+    Tweet atıldıktan sonra:
+    - posted_at + 1h yaklaşmışsa ve likes_1h null ise → 1h snapshot ölç
+    - posted_at + 6h yaklaşmışsa ve likes_6h null ise → 6h snapshot ölç
+    - posted_at + 24h yaklaşmışsa ve likes_24h null ise → 24h snapshot ölç
+    
+    Snapshot zamanı geçmiş ama hâlâ null kalmışsa (bot offline'dı vb.) yine ölç.
+    
+    Tüm 3 snapshot dolduktan sonra bu tweet artık liste dışı.
+    
+    Returns: [{'tweet_id': X, 'posted_tweet_id': Y, 'snapshot': '1h'|'6h'|'24h'}, ...]
+    """
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    now = datetime.datetime.utcnow()
+    
+    # Son 48 saat içinde paylaşılmış tweetleri getir (24h snapshot için marj)
+    cutoff = (now - datetime.timedelta(hours=48)).strftime('%Y-%m-%d %H:%M:%S')
+    
+    cursor.execute('''
+        SELECT tweet_id, posted_tweet_id, posted_at,
+               likes_1h, likes_6h, likes_24h
+        FROM Engagement_Metrics
+        WHERE posted_at >= ?
+    ''', (cutoff,))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    pending = []
+    for row in rows:
+        try:
+            posted_dt = datetime.datetime.strptime(row['posted_at'], '%Y-%m-%d %H:%M:%S')
+        except (TypeError, ValueError):
+            continue
+        age_minutes = (now - posted_dt).total_seconds() / 60
+        
+        # 1h snapshot: tweet en az 55 dakika eski + likes_1h hala null
+        if age_minutes >= 55 and row['likes_1h'] is None:
+            pending.append({
+                'tweet_id': row['tweet_id'],
+                'posted_tweet_id': row['posted_tweet_id'],
+                'snapshot': '1h'
+            })
+        # 6h snapshot
+        elif age_minutes >= 6 * 60 - 5 and row['likes_6h'] is None:
+            pending.append({
+                'tweet_id': row['tweet_id'],
+                'posted_tweet_id': row['posted_tweet_id'],
+                'snapshot': '6h'
+            })
+        # 24h snapshot
+        elif age_minutes >= 24 * 60 - 5 and row['likes_24h'] is None:
+            pending.append({
+                'tweet_id': row['tweet_id'],
+                'posted_tweet_id': row['posted_tweet_id'],
+                'snapshot': '24h'
+            })
+    
+    return pending
+
+def update_engagement(tweet_id: int, snapshot: str, likes: int, retweets: int, replies: int, views: int):
+    """Belirli bir snapshot için metric değerlerini günceller."""
+    if snapshot not in ('1h', '6h', '24h'):
+        raise ValueError(f"Geçersiz snapshot: {snapshot}")
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    now_iso = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Dynamic column name'ler — snapshot suffix ile
+    cursor.execute(f'''
+        UPDATE Engagement_Metrics
+        SET likes_{snapshot} = ?,
+            retweets_{snapshot} = ?,
+            replies_{snapshot} = ?,
+            views_{snapshot} = ?,
+            last_checked = ?
+        WHERE tweet_id = ?
+    ''', (likes, retweets, replies, views, now_iso, tweet_id))
     conn.commit()
     conn.close()

@@ -1,14 +1,13 @@
 """
-ai_manager.py — Faz 1 Güncellemesi
+ai_manager.py — Faz 2 Güncellemesi
 ==================================
-Düzeltmeler:
-- 429 (token limit) hatasında HEMEN çıkar, sonsuza kadar retry yapmaz
-- AI_PROVIDER flag'i: 'groq' veya 'gemini' (.env'den okur, default 'groq')
-- Content safety: küfür/hakaret/ırkçılık ATLA
-- Sıkılaştırılmış prompt: 4 büyükler dışı kesinlikle paylaşılmaz
-- Yerel haber tuzaklarına özel uyarı (Haber61 vb. trabzon yerel haberleri)
-- Kumar/promosyon/reklam içerikleri ATLA
-- Voleybol, tenis, basket, milli takım dışındaki spor dallarına ATLA
+Faz 1'e ek olarak:
+- max_output_tokens 4000 → 8192 (Gemini truncation'ı çözmek için)
+- Yeni: response.usage_metadata loglanıyor (gerçek token sayısı görülsün)
+- Yeni: response.candidates[0].finish_reason kontrolü (MAX_TOKENS uyarısı görsel)
+- A filtre: dedikodu, başkan adayı, hakem haberleri geçer; sadece futbol-dışı + clickbait + yerel haber elenir
+- Söz aktarımı koruması: "İsim: 'söz'" yapısı bozulmaz
+- Prompt biraz daha kısa ve net (token tasarrufu için)
 """
 
 import os
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # Provider seçimi
 # ============================================================
-AI_PROVIDER = os.getenv("AI_PROVIDER", "groq").lower()
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()
 
 if AI_PROVIDER == "gemini":
     from google import genai as genai_new
@@ -38,19 +37,17 @@ else:
     GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     logger.info(f"AI provider: Groq ({GROQ_MODEL})")
 
-# Custom exception — token limit aşıldığında main.py yakalayıp graceful skip yapsın
 class AIQuotaExceeded(Exception):
     pass
 
 # ============================================================
-# LLM Çağrısı
+# LLM Çağrıları
 # ============================================================
 
 def _call_groq(prompt: str) -> str:
-    """Groq çağrısı. 429 görürse direkt AIQuotaExceeded fırlatır."""
     if not _groq_client:
         raise RuntimeError("GROQ_API_KEY missing")
-    backoff = [3, 8, 20]  # 3 deneme, sonra çıkar
+    backoff = [3, 8, 20]
     last_err = None
     for attempt, delay in enumerate(backoff):
         try:
@@ -58,13 +55,14 @@ def _call_groq(prompt: str) -> str:
                 messages=[{"role": "user", "content": prompt}],
                 model=GROQ_MODEL,
                 temperature=0.7,
-                max_tokens=1500,  # batch için 500 yetmeyebilir
+                max_tokens=4000,
             )
-            return (response.choices[0].message.content or "").strip()
+            text = (response.choices[0].message.content or "").strip()
+            logger.info(f"Groq raw: len={len(text)}")
+            return text
         except Exception as e:
             err_str = str(e)
             last_err = e
-            # Token limit / quota hatasıysa retry yapma — limit zaten dolmuş
             if "429" in err_str or "rate_limit" in err_str.lower() or "quota" in err_str.lower():
                 logger.error(f"Groq quota exceeded (no retry): {err_str[:200]}")
                 raise AIQuotaExceeded(err_str) from e
@@ -74,7 +72,6 @@ def _call_groq(prompt: str) -> str:
     raise last_err
 
 def _call_gemini(prompt: str) -> str:
-    """Gemini çağrısı (yeni google-genai SDK). 429 görürse AIQuotaExceeded fırlatır."""
     if not _gemini_client:
         raise RuntimeError("GEMINI_API_KEY missing")
     backoff = [3, 8, 20]
@@ -87,11 +84,32 @@ def _call_gemini(prompt: str) -> str:
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
                     temperature=0.7,
-                    max_output_tokens=4000,
+                    max_output_tokens=8192,  # Faz 2: 4000 → 8192
                 )
             )
             text = (response.text or "").strip()
-            logger.info(f"Gemini raw: len={len(text)}, has_close={']' in text}")
+            
+            # Diagnostik: gerçek token sayısı + finish_reason
+            usage_info = ""
+            try:
+                if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                    um = response.usage_metadata
+                    usage_info = f" tokens(in={um.prompt_token_count}, out={um.candidates_token_count})"
+            except Exception:
+                pass
+            
+            finish_reason = ""
+            try:
+                if response.candidates and len(response.candidates) > 0:
+                    fr = response.candidates[0].finish_reason
+                    finish_reason = f" finish={fr}"
+                    # MAX_TOKENS uyarısı
+                    if str(fr) in ("FinishReason.MAX_TOKENS", "MAX_TOKENS", "2"):
+                        logger.warning(f"Gemini MAX_TOKENS sınırına ulaştı! Yanıt kesilmiş olabilir.")
+            except Exception:
+                pass
+            
+            logger.info(f"Gemini raw: len={len(text)}{usage_info}{finish_reason}")
             return text
         except Exception as e:
             err_str = str(e)
@@ -110,56 +128,68 @@ def _call_llm(prompt: str) -> str:
     return _call_groq(prompt)
 
 # ============================================================
-# Batch İşleme
+# Prompt — Faz 2 (A filtre + söz aktarımı koruması)
 # ============================================================
 
-PROMPT_TEMPLATE = """Sen @FlasFutbool adlı X hesabının profesyonel editörüsün. SADECE Türkiye'nin 4 BÜYÜK kulübüyle ilgili FUTBOL haberlerini paylaşırsın: Galatasaray (GS), Fenerbahçe (FB), Beşiktaş (BJK), Trabzonspor (TS).
+PROMPT_TEMPLATE = """Sen @FlasFutbool adlı X hesabının editörüsün. Türkiye'nin 4 BÜYÜK kulübüyle ilgili haberleri paylaşırsın: Galatasaray (GS), Fenerbahçe (FB), Beşiktaş (BJK), Trabzonspor (TS).
 
-==================== KESİN ATLA KURALLARI ====================
-Şunlardan HİÇBİRİNİ paylaşma, hepsini "ATLA" olarak işaretle:
+==================== ATLA KURALLARI ====================
+ATLA olarak işaretle:
 
-1) FUTBOL DIŞI SPORLAR: Voleybol, basketbol, tenis, atletizm, golf, motor sporları, dövüş sporları, e-spor, vb.
+1) FUTBOL DIŞI SPORLAR: Voleybol, basketbol, tenis, atletizm, golf, motor sporları, dövüş sporları, e-spor.
    Örnek atlanması gerekenler: "VakıfBank", "Zehra Güneş", "Anadolu Efes", "Fenerbahçe Beko" (basket), "Galatasaray Kadın Voleybol".
 
-2) 4 BÜYÜKLER DIŞI KULÜPLER: Samsunspor, Kasımpaşa, Konyaspor, Eyüpspor, Karagümrük, Gaziantep, vb. tek başına haber konusu olamaz.
-   İSTİSNA: Bu kulüplerden biri 4 büyüklerle TRANSFER veya TRANSFER DEDİKODUSU bağlamında geçerse PAYLAŞ.
+2) FUTBOL DIŞI HİÇBİR ŞEY: Trafik kazası, ölüm haberi (futbolcu hariç), siyaset, ekonomi, tarım, sağlık reklamı, iş ilanı, kumar/bahis tahmini, şehir haberleri, hava durumu.
 
-3) MİLLİ TAKIM HABERLERİ: A Milli Takım, Genç Milli Takım haberleri tek başına ATLA.
+3) 4 BÜYÜKLER İLE BAĞLANTISIZ KULÜPLER: Samsunspor, Konyaspor vb. tek başına haber konusu olmaz. AMA 4 büyüklerden biriyle transfer/maç/karşılaşma bağlantısı varsa PAYLAŞ.
 
-4) FUTBOL DIŞI HİÇBİR ŞEY: Trafik kazası, ölüm haberi, siyaset, ekonomi, tarım (fındık), sağlık (hastane, diş), reklam, iş ilanı, kumar/bahis tahmini ("xx oranla yy TL kazandı"), şehir haberleri, hava durumu.
+4) İÇERİK GÜVENLİĞİ: Küfür, hakaret, ırkçı/cinsiyetçi/ayrımcı söylem, kişiyi hedef alan saldırgan dil ATLA.
 
-5) İÇERİK GÜVENLİĞİ: Küfür, hakaret, ırkçı/cinsiyetçi/ayrımcı söylem, kişiyi hedef alan saldırgan dil içeren tweetler ATLA.
+5) İÇERİĞİ BOŞ CLICKBAIT: "Yıldız isim", "O futbolcu", "Bomba isim" gibi somut bilgi (isim/olay) içermeyen başlıklar ATLA.
+   İSTİSNA: Detay metninde net isim varsa, tweet'e o ismi koyarak PAYLAŞ.
 
-6) İÇERİĞİ BOŞ HABERLER: "Yıldız isim", "O futbolcu", "Bomba transfer", "Perde arkası belli oldu" gibi somut bilgi (isim/olay) içermeyen clickbait'ler ATLA. İSTİSNA: Detay metninde ismi varsa, tweet'e o ismi YAZARAK paylaş.
+==================== PAYLAŞ KURALLARI (GENİŞ FİLTRE) ====================
+ŞUNLARIN HEPSİ PAYLAŞILABILIR (4 büyüklerle ilgili olmak şartıyla):
+- Transfer ve transfer dedikoduları
+- Maç sonuçları, kadro, taktik, sakatlık, ceza
+- Yönetim, başkan adaylığı, kongre, mali tablolar
+- Hakem atamaları, VAR kararları
+- Antrenör (teknik direktör) haberleri, ayrılık/yeni geliş
+- Futbolcu özel hayatı / sosyal medya çıkışları (eğer haber değeri varsa)
+- "🚨 ÖZEL", "FLAŞ" gibi haberler — somut bilgi varsa paylaş, içeriği boşsa atla
+- Milli takım haberleri 4 büyüklerden bir oyuncuyu içeriyorsa PAYLAŞ
 
-==================== PAYLAŞ KURALLARI ====================
-Bir haberi PAYLAŞ olarak işaretlersen:
-- Tweet 280 karakteri AŞMASIN
-- Sonuna parantez içinde kaynak ekle. Öncelik sırası: (1) tweet metninde zaten parantez içinde bir kaynak varsa onu kullan, (2) yoksa Kaynak alanındaki hesabı kullan, (3) ikisi de yoksa parantez ekleme. Asla iki ayrı parantez yazma.
-- Tweet metni TÜRKÇE olmalı, asıl haberin özünü versin
-- "bomba", "saldırı", "şok" gibi spor terimleri serbesttir, sansürleme
-- Emoji kullanma (zaten kaynak hesaplar yeterince kullanmış oluyor)
+==================== TWEET YAZIM KURALLARI ====================
+ÇOK ÖNEMLİ — SÖZ AKTARIMLARINI DEĞİŞTİRME:
+- Eğer haberde birinin sözü tırnak içinde geçiyorsa ("Sercan Hamzaoğlu: 'falan filan'"), bu sözü AYNEN koru.
+- Söylenmemiş söz ekleme, söylenen sözü değiştirme.
+- Kendi yorum cümleni eklemek YASAK.
+
+TWEET FORMATI:
+- 280 karakteri AŞMA. Çok uzun haberlerde özün korunması için kısaltma yapabilirsin AMA tırnak içi sözleri değiştirme.
+- Sonunda parantez içinde KAYNAK ekle:
+  * Eğer haber metninde zaten parantezli kaynak varsa (örn. "(Hürriyet)" veya "(Sabah)") onu koru, ekleme yapma
+  * Eğer yoksa, "Kaynak" alanındaki @kullanıcıadı'nı kullan, örn: (@yagosabuncuoglu)
+  * İki kaynak ekleme — bir tane yeterli
+- Emoji EKLEME (zaten varsa koruyabilirsin).
+- Tweet TÜRKÇE olsun.
 
 ==================== MÜKERRER KONTROLÜ ====================
-Aşağıdaki haberler son 12 saatte zaten işlendi. Listedeki bir haberle AYNI KONUYU işleyen yeni haberi ATLA:
+Aşağıdakilerle aynı konuyu işleyen yeni haberi ATLA:
 {recent_titles}
 
 ==================== HABER LİSTESİ ====================
 {news_formatted}
 
 ==================== ÇIKTI FORMATI ====================
-SADECE aşağıdaki JSON array'ı döndür, başka hiçbir şey yazma. Açıklama, markdown, ön söz, son söz hiçbir şey yok:
+SADECE bir JSON array döndür. Açıklama, markdown, ön söz YOK:
 [
   {{"id": 0, "decision": "PAYLAS", "tweet": "..."}},
-  {{"id": 1, "decision": "ATLA"}},
-  ...
+  {{"id": 1, "decision": "ATLA"}}
 ]"""
 
 
 def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List[Dict]:
-    """
-    Haberleri toplu işler. AIQuotaExceeded fırlatabilir — main.py yakalamalı.
-    """
     if not news_items:
         return []
 
@@ -182,26 +212,25 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
     try:
         response_text = _call_llm(prompt)
     except AIQuotaExceeded:
-        # Yukarı fırlat — main.py tüm collector'ı durdurur
         raise
     except Exception as e:
         logger.error(f"AI call failed: {e}")
         return []
 
-    # Markdown code block'larını temizle (```json, ```JSON, ``` vb.)
+    # Markdown code block'larını temizle
     clean_text = re.sub(r'^```[a-zA-Z]*\n?', '', response_text.strip())
     clean_text = re.sub(r'\n?```\s*$', '', clean_text)
-    # BOM ve invisible Unicode karakterleri temizle
     clean_text = clean_text.lstrip('﻿​‌‍⁠').strip()
 
     results = None
+
     # 1. Direkt parse
     try:
         results = json.loads(clean_text)
     except json.JSONDecodeError:
         pass
 
-    # 2. Greedy regex ile tam array bul
+    # 2. Greedy regex
     if results is None:
         m = re.search(r'\[.+\]', clean_text, re.DOTALL)
         if m:
@@ -210,7 +239,7 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
             except json.JSONDecodeError:
                 pass
 
-    # 3. Partial parse: truncated response'dan tamamlanmış item'ları topla
+    # 3. Partial parse
     if results is None:
         objects = re.findall(r'\{[^{}]*"decision"\s*:\s*"[^"]*"[^{}]*\}', clean_text)
         if objects:

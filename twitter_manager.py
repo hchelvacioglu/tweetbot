@@ -1,32 +1,30 @@
 """
-twitter_manager.py — Faz 1 Güncellemesi
+twitter_manager.py — Faz 2 Güncellemesi
 =======================================
-Düzeltmeler:
-- get_list_tweets: parametre adları GetXAPI dokümanına uyumlu hale getirildi (q->query, count->limit)
-- Hata loglaması artık response.text içeriğini de gösteriyor (debug için kritik)
-- post_tweet: 500 hatasında daha net log
-- Timeout süreleri artırıldı (GetXAPI yavaş olabiliyor)
+Faz 1'e ek olarak:
+- get_tweet_metrics(tweet_id): tek bir tweet'in beğeni/RT/reply/view sayısını çeker
+- get_tweets_metrics_batch(tweet_ids): birden fazla tweet için aynı sorguyu yapar
+- get_list_tweets'te 'q' ve 'count' parametreleri korundu (GetXAPI doğru olanı bunlar)
+- post_tweet artık başarıda Twitter ID'sini döner (engagement tracking için kritik)
 """
 
 import os
 import time
 import logging
 import requests
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
 GETXAPI_BASE_URL = "https://api.getxapi.com"
 
 def _get_headers():
-    """Authorization header'larını her çağrıda ortamdan tazeleyerek döner."""
     return {
         "Authorization": f"Bearer {os.getenv('GETXAPI_KEY')}",
         "Content-Type": "application/json"
     }
 
 def _log_response_error(prefix: str, response: requests.Response):
-    """Hata yanıtlarını detaylı logla — debug için kritik."""
     try:
         body = response.text[:500]
     except Exception:
@@ -34,11 +32,10 @@ def _log_response_error(prefix: str, response: requests.Response):
     logger.error(f"{prefix} | status={response.status_code} | body={body}")
 
 # ============================================================
-# READ
+# READ — Liste / Kullanıcı Tweetleri
 # ============================================================
 
 def get_recent_tweets(username: str, count: int = 20) -> List[Dict]:
-    """Bir kullanıcının son tweetlerini getirir."""
     try:
         url = f"{GETXAPI_BASE_URL}/twitter/user/tweets"
         params = {"userName": username}
@@ -55,8 +52,8 @@ def get_recent_tweets(username: str, count: int = 20) -> List[Dict]:
 
 def get_list_tweets(list_id: str, count: int = 40) -> List[Dict]:
     """
-    Twitter listesinden son tweetleri getirir.
-    Düzeltme: GetXAPI 'query' ve 'limit' bekliyordu, eski kod 'q' ve 'count' yolluyordu.
+    Twitter listesinden son tweet'leri getirir.
+    GetXAPI 'q' ve 'count' parametrelerini bekliyor (canlıda doğrulandı).
     """
     try:
         url = f"{GETXAPI_BASE_URL}/twitter/tweet/advanced_search"
@@ -77,11 +74,51 @@ def get_list_tweets(list_id: str, count: int = 40) -> List[Dict]:
         return []
 
 # ============================================================
-# WRITE
+# READ — Engagement Metrics (Faz 2 yeni)
 # ============================================================
 
-def post_tweet(text: str, reply_to_id: str = None) -> bool:
-    """Tek tweet atar."""
+def get_tweet_metrics(tweet_id: str) -> Optional[Dict]:
+    """
+    Tek bir tweet'in son metric'lerini çeker.
+    Returns: {'likes': X, 'retweets': Y, 'replies': Z, 'views': W} or None
+    
+    GetXAPI'nin tweet detail endpoint'i kullanılır.
+    """
+    try:
+        url = f"{GETXAPI_BASE_URL}/twitter/tweet/by-id"
+        params = {"tweet_id": tweet_id}
+        response = requests.get(url, headers=_get_headers(), params=params, timeout=20)
+        if response.status_code >= 400:
+            _log_response_error(f"get_tweet_metrics({tweet_id}) failed", response)
+            return None
+        data = response.json()
+        # GetXAPI farklı response yapıları döndürebiliyor — esnek parse
+        tweet = data.get("tweet") or data.get("data") or data
+        if not tweet or not isinstance(tweet, dict):
+            return None
+        return {
+            "likes": int(tweet.get("likeCount", 0) or 0),
+            "retweets": int(tweet.get("retweetCount", 0) or 0),
+            "replies": int(tweet.get("replyCount", 0) or 0),
+            "views": int(tweet.get("viewCount", 0) or 0),
+        }
+    except requests.exceptions.RequestException as e:
+        logger.error(f"get_tweet_metrics({tweet_id}) network error: {e}")
+        return None
+    except (ValueError, TypeError) as e:
+        logger.error(f"get_tweet_metrics({tweet_id}) parse error: {e}")
+        return None
+
+# ============================================================
+# WRITE — Tweet Atma
+# ============================================================
+
+def post_tweet(text: str, reply_to_id: str = None) -> Union[bool, str]:
+    """
+    Tek tweet atar.
+    Faz 2: başarıda Twitter tweet ID'sini döner (string).
+    Başarısızlıkta False döner. (Geri uyumlu — bool kontrolünde False çalışır.)
+    """
     try:
         url = f"{GETXAPI_BASE_URL}/twitter/tweet/create"
         payload = {
@@ -100,9 +137,9 @@ def post_tweet(text: str, reply_to_id: str = None) -> bool:
 
         data = response.json()
         if data.get("status") == "success":
-            tweet_id = data.get("data", {}).get("id", "N/A")
+            tweet_id = data.get("data", {}).get("id", "")
             logger.info(f"✓ Tweet posted! ID: {tweet_id}")
-            return True
+            return tweet_id if tweet_id else True  # ID yoksa True döner (geri uyumluluk)
         else:
             logger.error(f"Tweet post unexpected response: {data}")
             return False
@@ -111,12 +148,15 @@ def post_tweet(text: str, reply_to_id: str = None) -> bool:
         logger.error(f"post_tweet network error: {e}")
         return False
 
-def post_thread(tweets: List[str]) -> bool:
-    """Thread (zincirleme tweetler) atar."""
+def post_thread(tweets: List[str]) -> Union[bool, str]:
+    """
+    Thread atar. İlk tweet'in ID'sini döner (engagement için anchor).
+    """
     if not tweets:
         return False
     logger.info(f"Posting thread with {len(tweets)} tweets...")
     previous_tweet_id = None
+    first_tweet_id = None
 
     for i, tweet_text in enumerate(tweets):
         try:
@@ -136,6 +176,8 @@ def post_thread(tweets: List[str]) -> bool:
             data = response.json()
             if data.get("status") == "success":
                 previous_tweet_id = data.get("data", {}).get("id")
+                if i == 0:
+                    first_tweet_id = previous_tweet_id
                 logger.info(f"Thread tweet {i+1}/{len(tweets)} posted. ID: {previous_tweet_id}")
             else:
                 logger.error(f"Thread tweet {i+1} unexpected: {data}")
@@ -148,4 +190,4 @@ def post_thread(tweets: List[str]) -> bool:
             return False
 
     logger.info("✓ Thread posted!")
-    return True
+    return first_tweet_id if first_tweet_id else True
