@@ -85,15 +85,15 @@ def get_tweet_metrics(tweet_id: str) -> Optional[Dict]:
     GetXAPI'nin tweet detail endpoint'i kullanılır.
     """
     try:
-        url = f"{GETXAPI_BASE_URL}/twitter/tweet/by-id"
-        params = {"tweet_id": tweet_id}
+        url = f"{GETXAPI_BASE_URL}/twitter/tweet/detail"
+        params = {"id": tweet_id}
         response = requests.get(url, headers=_get_headers(), params=params, timeout=20)
         if response.status_code >= 400:
             _log_response_error(f"get_tweet_metrics({tweet_id}) failed", response)
             return None
         data = response.json()
         # GetXAPI farklı response yapıları döndürebiliyor — esnek parse
-        tweet = data.get("tweet") or data.get("data") or data
+        tweet = data.get("data") or data.get("tweet") or {}
         if not tweet or not isinstance(tweet, dict):
             return None
         return {
@@ -191,3 +191,32 @@ def post_thread(tweets: List[str]) -> Union[bool, str]:
 
     logger.info("✓ Thread posted!")
     return first_tweet_id if first_tweet_id else True
+
+def post_quote_tweet(text: str, quote_url: str):
+    """
+    Quote tweet atar. quote_url tam tweet URL'si olmalı.
+    Başarıda yeni tweet ID döner (string), aksi False döner.
+    """
+    try:
+        url = f"{GETXAPI_BASE_URL}/twitter/tweet/create"
+        payload = {
+            "auth_token": os.getenv("X_AUTH_TOKEN"),
+            "text": text,
+            "quote_tweet_url": quote_url
+        }
+        logger.info(f"Posting quote tweet: '{text[:40]}' quoting {quote_url[-40:]}")
+        response = requests.post(url, headers=_get_headers(), json=payload, timeout=45)
+        if response.status_code >= 400:
+            _log_response_error("post_quote_tweet failed", response)
+            return False
+        data = response.json()
+        if data.get("status") == "success":
+            tweet_id = data.get("data", {}).get("id", "")
+            logger.info(f"✓ Quote tweet posted! ID: {tweet_id}")
+            return tweet_id if tweet_id else True
+        else:
+            logger.error(f"Quote tweet unexpected response: {data}")
+            return False
+    except requests.exceptions.RequestException as e:
+        logger.error(f"post_quote_tweet network error: {e}")
+        return False

@@ -75,6 +75,14 @@ def is_too_old(date_str: str) -> bool:
     age = datetime.datetime.now(datetime.timezone.utc) - dt
     return age.total_seconds() > MAX_TWEET_AGE_HOURS * 3600
 
+def has_media(tweet: dict) -> bool:
+    media = tweet.get('media') or []
+    return isinstance(media, list) and len(media) > 0
+
+def is_quote_of_quote(tweet: dict) -> bool:
+    qt = tweet.get('quoted_tweet')
+    return qt is not None and isinstance(qt, dict) and bool(qt)
+
 # ============================================================
 # Publisher
 # ============================================================
@@ -90,13 +98,18 @@ def publisher_job():
 
     tweet_id = tweet['id']
     tweet_content_str = tweet['tweet_content']
+    share_type = tweet.get('share_type') or 'text'
+    quote_url = tweet.get('quote_url')
 
     try:
         content_to_post = json.loads(tweet_content_str)
     except (json.JSONDecodeError, TypeError):
         content_to_post = tweet_content_str
 
-    if isinstance(content_to_post, list):
+    if share_type == 'quote' and quote_url:
+        upper_text = content_to_post if isinstance(content_to_post, str) else "📌 Gündem"
+        result = twitter_manager.post_quote_tweet(upper_text, quote_url)
+    elif isinstance(content_to_post, list):
         result = twitter_manager.post_thread(content_to_post)
     else:
         result = twitter_manager.post_tweet(content_to_post)
@@ -104,9 +117,8 @@ def publisher_job():
     # result: ya str (tweet ID) ya True ya False
     if result:
         if isinstance(result, str) and result:
-            # Tweet ID ile kaydet → engagement tracker buradan başlar
             database.save_posted_tweet_id(tweet_id, result)
-            logger.info(f"[Publisher] ✓ ID {tweet_id} paylaşıldı (Twitter ID: {result}).")
+            logger.info(f"[Publisher] ✓ ID {tweet_id} ({share_type}) paylaşıldı (Twitter ID: {result}).")
         else:
             # ID alınamadı, sadece status güncelle (eski davranış, engagement yapılmayacak)
             database.update_tweet_status(tweet_id, 'Paylasildi')
@@ -143,6 +155,8 @@ def twitter_collector_job():
     skipped_likes = 0
     skipped_age = 0
     skipped_dup = 0
+    media_count = 0
+    quote_skip_count = 0
 
     for tweet in tweets:
         text = tweet.get('text', '')
@@ -162,10 +176,18 @@ def twitter_collector_job():
             skipped_dup += 1
             continue
 
+        tweet_has_media = has_media(tweet)
+        is_qoq = is_quote_of_quote(tweet)
+        will_quote = tweet_has_media and not is_qoq
+        if tweet_has_media:
+            media_count += 1
+        if is_qoq:
+            quote_skip_count += 1
+
         username = tweet.get('userName', '') or ''
-        if not username:
-            url = tweet.get('url', '')
-            parts = url.rstrip('/').split('/')
+        tweet_url = tweet.get('url', '') or ''
+        if not username and tweet_url:
+            parts = tweet_url.rstrip('/').split('/')
             if len(parts) >= 4 and parts[-2] == 'status':
                 username = parts[-3]
         source = f"@{username}" if username else ""
@@ -173,22 +195,26 @@ def twitter_collector_job():
         pending_items.append({
             "title": text,
             "description": "",
-            "link": tweet.get('url', ''),
+            "link": tweet_url,
             "source": source,
-            "published_date": tweet.get('createdAt') or time.strftime('%Y-%m-%d %H:%M:%S')
+            "published_date": tweet.get('createdAt') or time.strftime('%Y-%m-%d %H:%M:%S'),
+            "_will_quote": will_quote,
+            "_tweet_url": tweet_url,
         })
 
     logger.info(
         f"[Collector] Filtreleme: {len(tweets)} tweet → "
         f"{len(pending_items)} aday "
-        f"(düşük beğeni: {skipped_likes}, eski: {skipped_age}, mükerrer: {skipped_dup})"
+        f"(düşük beğeni: {skipped_likes}, eski: {skipped_age}, mükerrer: {skipped_dup}, "
+        f"medya: {media_count}, q-of-q skip: {quote_skip_count})"
     )
 
     if not pending_items:
         return
 
     saved_count = 0
-    # Faz 2: batch size 10 → 5 (configurable via env)
+    quote_count = 0
+    text_count = 0
     for i in range(0, len(pending_items), AI_BATCH_SIZE):
         batch = pending_items[i:i + AI_BATCH_SIZE]
         try:
@@ -201,19 +227,48 @@ def twitter_collector_job():
             logger.error(f"[Collector] Batch hatası: {e}")
             continue
 
+        title_to_item = {item['title']: item for item in batch}
+
         for res in results:
-            ok = database.add_pending_tweet(
-                res['title'], res['link'], res['published_date'], res['tweet']
-            )
+            original_item = title_to_item.get(res['title'])
+            if not original_item:
+                continue
+
+            will_quote = original_item.get('_will_quote', False)
+            tweet_url = original_item.get('_tweet_url', '')
+
+            if will_quote and tweet_url:
+                ok = database.add_pending_tweet(
+                    title=res['title'],
+                    link=res['link'],
+                    published_date=res['published_date'],
+                    tweet_content=res['etiket'],
+                    share_type='quote',
+                    quote_url=tweet_url
+                )
+                if ok:
+                    quote_count += 1
+            else:
+                ok = database.add_pending_tweet(
+                    title=res['title'],
+                    link=res['link'],
+                    published_date=res['published_date'],
+                    tweet_content=res['tweet'],
+                    share_type='text'
+                )
+                if ok:
+                    text_count += 1
+
             if ok:
                 saved_count += 1
                 recent_titles.append(res['title'])
-                logger.info(f"[Collector] + Kuyruğa: {res['title'][:60]}")
+                marker = "🎬" if will_quote else "📝"
+                logger.info(f"[Collector] {marker} Kuyruğa: {res['title'][:60]}")
 
         if i + AI_BATCH_SIZE < len(pending_items):
             time.sleep(5)
 
-    logger.info(f"[Collector] Bitti. {saved_count} yeni tweet kuyruğa eklendi.")
+    logger.info(f"[Collector] Bitti. {saved_count} yeni tweet (quote: {quote_count}, text: {text_count}).")
 
 # ============================================================
 # Engagement Tracker (Faz 2 yeni)
@@ -274,7 +329,7 @@ def engagement_tracker_job():
 
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("X Sports News Bot başlatılıyor (Faz 2)...")
+    logger.info("X Sports News Bot başlatılıyor (Faz 3 — Quote Tweet)...")
     logger.info(f"AI Provider: {ai_manager.AI_PROVIDER}")
     logger.info(f"List ID: {TWITTER_LIST_ID}")
     logger.info(f"Min Likes: {MIN_LIKES} | Max Age: {MAX_TWEET_AGE_HOURS}h | AI Batch: {AI_BATCH_SIZE}")

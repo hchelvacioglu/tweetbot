@@ -174,6 +174,21 @@ TWEET FORMATI:
 - Emoji EKLEME (zaten varsa koruyabilirsin).
 - Tweet TÜRKÇE olsun.
 
+==================== ETİKET KURALLARI ====================
+Her PAYLAS kararı için 'etiket' alanı da üret. Bu, quote tweet üst metni olarak kullanılacak.
+Format: "EMOJI Kategori | Takım"
+Kategoriler:
+- 📰 Transfer (transfer haberi/dedikodusu)
+- ⚽ Maç (maç öncesi/sonrası, kadro, sonuç, taktik)
+- 🟨 Hakem (hakem atamaları, VAR)
+- 🏛️ Yönetim (başkan, transfer komitesi, mali, kongre)
+- 🎙️ Açıklama (basın toplantısı, demeç, röportaj)
+- 🩹 Sakatlık (sakatlık, sağlık)
+- 📌 Genel (yukarıdakilere uymayan, futbolcu özel hayat vs)
+
+Takım kısaltmaları: GS, FB, BJK, TS. Birden fazlaysa "GS-FB" gibi.
+Örnekler: "📰 Transfer | GS", "🎙️ Açıklama | FB", "⚽ Maç | BJK-GS", "🏛️ Yönetim | FB"
+
 ==================== MÜKERRER KONTROLÜ ====================
 Aşağıdakilerle aynı konuyu işleyen yeni haberi ATLA:
 {recent_titles}
@@ -184,7 +199,7 @@ Aşağıdakilerle aynı konuyu işleyen yeni haberi ATLA:
 ==================== ÇIKTI FORMATI ====================
 SADECE bir JSON array döndür. Açıklama, markdown, ön söz YOK:
 [
-  {{"id": 0, "decision": "PAYLAS", "tweet": "..."}},
+  {{"id": 0, "decision": "PAYLAS", "tweet": "...", "etiket": "📰 Transfer | GS"}},
   {{"id": 1, "decision": "ATLA"}}
 ]"""
 
@@ -260,13 +275,17 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
         if idx is None or idx >= len(news_items):
             continue
         if decision in ("PAYLAS", "PAYLAŞ"):
-            tweet_text = res.get("tweet", "").strip()
+            tweet_text = (res.get("tweet") or "").strip()
+            etiket = (res.get("etiket") or "").strip()
             if not tweet_text:
                 continue
+            if not etiket:
+                etiket = "📌 Gündem"
             item = news_items[idx]
             processed.append({
                 "title": item['title'],
                 "tweet": tweet_text,
+                "etiket": etiket,
                 "link": item['link'],
                 "published_date": item.get('published_date', time.strftime('%Y-%m-%d %H:%M:%S'))
             })

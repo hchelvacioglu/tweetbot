@@ -62,7 +62,9 @@ def init_db():
             attempt_count INTEGER DEFAULT 0,
             content_hash TEXT,
             posted_tweet_id TEXT,
-            posted_at DATETIME
+            posted_at DATETIME,
+            share_type TEXT DEFAULT 'text',
+            quote_url TEXT
         )
     ''')
 
@@ -72,6 +74,8 @@ def init_db():
         ("content_hash", "TEXT"),
         ("posted_tweet_id", "TEXT"),
         ("posted_at", "DATETIME"),
+        ("share_type", "TEXT DEFAULT 'text'"),
+        ("quote_url", "TEXT"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE Bekleyen_Tweetler ADD COLUMN {col_def[0]} {col_def[1]}")
@@ -111,16 +115,16 @@ def init_db():
 # Yazma — Bekleyen Tweetler
 # ============================================================
 
-def add_pending_tweet(title: str, link: str, published_date: str, tweet_content: str) -> bool:
+def add_pending_tweet(title: str, link: str, published_date: str, tweet_content: str, share_type: str = 'text', quote_url: str = None) -> bool:
     h = make_hash(title)
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO Bekleyen_Tweetler 
-                (title, link, published_date, tweet_content, status, content_hash)
-            VALUES (?, ?, ?, ?, 'Bekliyor', ?)
-        ''', (title, link, published_date, tweet_content, h))
+            INSERT INTO Bekleyen_Tweetler
+                (title, link, published_date, tweet_content, status, content_hash, share_type, quote_url)
+            VALUES (?, ?, ?, ?, 'Bekliyor', ?, ?, ?)
+        ''', (title, link, published_date, tweet_content, h, share_type, quote_url))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
