@@ -32,3 +32,4 @@ Thumbs.db
 # Yedek klasörleri
 backup_*/
 tweetbot_backup_*/
+.claude/
