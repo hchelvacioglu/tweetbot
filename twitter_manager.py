@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 
 GETXAPI_BASE_URL = "https://api.getxapi.com"
 
+def make_video_embed_url(tweet_url: str) -> str:
+    """
+    Tweet URL'sini /video/1 formatına çevirir.
+    Query parametrelerini temizler (?s=20 vb).
+
+    Örnek:
+      https://x.com/user/status/123?s=20  →  https://x.com/user/status/123/video/1
+      https://x.com/user/status/123       →  https://x.com/user/status/123/video/1
+    """
+    if not tweet_url:
+        return ""
+    clean = tweet_url.split('?')[0].split('#')[0]
+    clean = clean.rstrip('/')
+    return f"{clean}/video/1"
+
 def _get_headers():
     return {
         "Authorization": f"Bearer {os.getenv('GETXAPI_KEY')}",

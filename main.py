@@ -79,6 +79,24 @@ def has_media(tweet: dict) -> bool:
     media = tweet.get('media') or []
     return isinstance(media, list) and len(media) > 0
 
+def get_media_type(tweet: dict) -> str:
+    """
+    Tweet'teki medya türünü döner.
+    Returns: 'video', 'gif', 'photo', veya 'none'
+    """
+    media = tweet.get('media') or []
+    if not isinstance(media, list) or len(media) == 0:
+        return 'none'
+    first = media[0] if isinstance(media[0], dict) else {}
+    mtype = (first.get('type') or '').lower()
+    if mtype == 'video':
+        return 'video'
+    if mtype == 'animated_gif':
+        return 'gif'
+    if mtype == 'photo':
+        return 'photo'
+    return 'none'
+
 def is_quote_of_quote(tweet: dict) -> bool:
     qt = tweet.get('quoted_tweet')
     return qt is not None and isinstance(qt, dict) and bool(qt)
@@ -142,13 +160,12 @@ def publisher_job():
     except (json.JSONDecodeError, TypeError):
         content_to_post = tweet_content_str
 
-    if share_type == 'quote' and quote_url:
-        upper_text = content_to_post if isinstance(content_to_post, str) else "📌 Gündem"
-        result = twitter_manager.post_quote_tweet(upper_text, quote_url)
-    elif isinstance(content_to_post, list):
+    # Faz 5: Quote tweet kaldırıldı. Tüm paylaşımlar post_tweet ile.
+    # video_embed durumunda tweet_content zaten "metin + URL" şeklinde.
+    if isinstance(content_to_post, list):
         result = twitter_manager.post_thread(content_to_post)
     else:
-        result = twitter_manager.post_tweet(content_to_post)
+        result = twitter_manager.post_tweet(content_to_post if isinstance(content_to_post, str) else "")
 
     # result: ya str (tweet ID) ya True ya False
     if result:
@@ -219,10 +236,18 @@ def twitter_collector_job():
             skipped_dup += 1
             continue
 
-        tweet_has_media = has_media(tweet)
+        media_type = get_media_type(tweet)
         is_qoq = is_quote_of_quote(tweet)
-        will_quote = tweet_has_media and not is_qoq
-        if tweet_has_media:
+
+        # Karar:
+        # - Video/GIF + qoq değil → video_embed (Faz 5)
+        # - Diğer hepsi (görsel, medya yok, qoq) → text
+        if media_type in ('video', 'gif') and not is_qoq:
+            share_decision = 'video_embed'
+        else:
+            share_decision = 'text'
+
+        if media_type != 'none':
             media_count += 1
         if is_qoq:
             quote_skip_count += 1
@@ -251,8 +276,9 @@ def twitter_collector_job():
             "link": tweet_url,
             "source": source,
             "published_date": tweet.get('createdAt') or time.strftime('%Y-%m-%d %H:%M:%S'),
-            "_will_quote": will_quote,
+            "_share_decision": share_decision,
             "_tweet_url": tweet_url,
+            "_source_username": username,
         })
 
     logger.info(
@@ -266,7 +292,7 @@ def twitter_collector_job():
         return
 
     saved_count = 0
-    quote_count = 0
+    video_embed_count = 0
     text_count = 0
     for i in range(0, len(pending_items), AI_BATCH_SIZE):
         batch = pending_items[i:i + AI_BATCH_SIZE]
@@ -287,26 +313,34 @@ def twitter_collector_job():
             if not original_item:
                 continue
 
-            will_quote = original_item.get('_will_quote', False)
+            share_decision = original_item.get('_share_decision', 'text')
             tweet_url = original_item.get('_tweet_url', '')
+            source_username = original_item.get('_source_username', '')
 
-            if will_quote and tweet_url:
+            # AI'dan gelen tweet metni (orijinal kaynak metnin sıkıştırılmış hali)
+            base_text = res['tweet'].strip()
+
+            # Kaynak ekle (eğer base_text içinde zaten yoksa)
+            if source_username and f"@{source_username}" not in base_text:
+                if not base_text.endswith(')'):
+                    base_text = f"{base_text} (@{source_username})"
+
+            if share_decision == 'video_embed' and tweet_url:
+                # Faz 5: text + /video/1 URL
+                video_url = twitter_manager.make_video_embed_url(tweet_url)
+                full_text = f"{base_text} {video_url}"
                 ok = database.add_pending_tweet(
-                    title=res['title'],
-                    link=res['link'],
-                    published_date=res['published_date'],
-                    tweet_content=res['etiket'],
-                    share_type='quote',
-                    quote_url=tweet_url
+                    title=res['title'], link=res['link'], published_date=res['published_date'],
+                    tweet_content=full_text,
+                    share_type='video_embed'
                 )
                 if ok:
-                    quote_count += 1
+                    video_embed_count += 1
             else:
+                # Text tweet (medya yok veya görsel)
                 ok = database.add_pending_tweet(
-                    title=res['title'],
-                    link=res['link'],
-                    published_date=res['published_date'],
-                    tweet_content=res['tweet'],
+                    title=res['title'], link=res['link'], published_date=res['published_date'],
+                    tweet_content=base_text,
                     share_type='text'
                 )
                 if ok:
@@ -315,13 +349,16 @@ def twitter_collector_job():
             if ok:
                 saved_count += 1
                 recent_titles.append(res['title'])
-                marker = "🎬" if will_quote else "📝"
+                marker = "🎬" if share_decision == 'video_embed' else "📝"
                 logger.info(f"[Collector] {marker} Kuyruğa: {res['title'][:60]}")
 
         if i + AI_BATCH_SIZE < len(pending_items):
             time.sleep(5)
 
-    logger.info(f"[Collector] Bitti. {saved_count} yeni tweet (quote: {quote_count}, text: {text_count}).")
+    logger.info(
+        f"[Collector] Bitti. {saved_count} yeni tweet "
+        f"(video: {video_embed_count}, text: {text_count})."
+    )
 
 # ============================================================
 # Engagement Tracker (Faz 2 yeni)
@@ -382,7 +419,7 @@ def engagement_tracker_job():
 
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("X Sports News Bot başlatılıyor (Faz 3 — Quote Tweet)...")
+    logger.info("X Sports News Bot başlatılıyor (Faz 5 — Video Embed + Akıllı Filtre)...")
     logger.info(f"AI Provider: {ai_manager.AI_PROVIDER}")
     logger.info(f"List ID: {TWITTER_LIST_ID}")
     logger.info(f"Filtre: Akıllı (engagement rate + RT ratio) | Max Age: {MAX_TWEET_AGE_HOURS}h | AI Batch: {AI_BATCH_SIZE}")

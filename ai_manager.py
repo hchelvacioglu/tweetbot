@@ -193,54 +193,24 @@ ATLA olarak işaretle:
 - Milli takım haberleri 4 büyüklerden bir oyuncuyu içeriyorsa PAYLAŞ
 
 ==================== TWEET YAZIM KURALLARI ====================
-ÇOK ÖNEMLİ — SÖZ AKTARIMLARINI DEĞİŞTİRME:
-- Eğer haberde birinin sözü tırnak içinde geçiyorsa ("Sercan Hamzaoğlu: 'falan filan'"), bu sözü AYNEN koru.
-- Söylenmemiş söz ekleme, söylenen sözü değiştirme.
-- Kendi yorum cümleni eklemek YASAK.
+ÖNEMLİ — KAYNAK METNİ ASLA DEĞİŞTİRME:
+- AI olarak tweet metnini ÜRETMİYORSUN. Sadece kaynak haberin metnini AKTAR.
+- Söz aktarımları varsa ("İsim: 'söz'") AYNEN koru.
+- Yorum cümleni eklemek YASAK.
 
-TWEET FORMATI:
-- 280 karakteri AŞMA. Çok uzun haberlerde özün korunması için kısaltma yapabilirsin AMA tırnak içi sözleri değiştirme.
-- Sonunda parantez içinde KAYNAK ekle:
-  * Eğer haber metninde zaten parantezli kaynak varsa (örn. "(Hürriyet)" veya "(Sabah)") onu koru, ekleme yapma
-  * Eğer yoksa, "Kaynak" alanındaki @kullanıcıadı'nı kullan, örn: (@yagosabuncuoglu)
-  * İki kaynak ekleme — bir tane yeterli
+UZUNLUK:
+- Eğer kaynak metin 230 karakterden KISA ise: aynen aktar (tweet alanına olduğu gibi yaz).
+- Eğer kaynak metin 230 karakterden UZUN ise: anlamı bozmayacak şekilde 230 karaktere KISALT. Söz aktarımlarını bozma, isimleri çıkarma.
+
+KAYNAK BİLGİSİ:
+- Kaynak hesap kullanıcı adı kod tarafından otomatik eklenecek.
+- Eğer kaynak metinde zaten "(@kullaniciadi)" veya "(Hürriyet)" gibi parantezli kaynak varsa, ekleme; yoksa kod ekleyecek.
+- Tweet'ine kendin kaynak ekleme.
+
+DİĞER:
 - Emoji EKLEME (zaten varsa koruyabilirsin).
 - Tweet TÜRKÇE olsun.
-
-==================== ETİKET KURALLARI (ZORUNLU FORMAT) ====================
-Her PAYLAS kararı için 'etiket' alanı ZORUNLU. Bu alan quote tweet'in üst metni olur.
-
-KESİN FORMAT (asla başka format kullanma):
-"<EMOJI> <KATEGORI> | <TAKIM>"
-
-Sadece şu 7 kategoriden BİRİNİ seç:
-- 📰 Transfer    (transfer, kiralık, sözleşme, ayrılık)
-- ⚽ Maç         (maç öncesi, sonucu, kadro, taktik, hazırlık)
-- 🟨 Hakem       (hakem ataması, VAR, kart, ceza)
-- 🏛️ Yönetim    (başkan, transfer komitesi, mali, kongre, açıklama)
-- 🎙️ Açıklama   (basın toplantısı, demeç, röportaj, sosyal medya çıkışı)
-- 🩹 Sakatlık    (sakatlık, sağlık raporu, ameliyat)
-- 📌 Gündem      (yukarıdakilere uymayanlar — son çare)
-
-Sadece şu 4 takım kısaltmasını kullan: GS, FB, BJK, TS
-Birden fazlaysa tire ile ayır: GS-FB, BJK-TS
-Genel haberse: TR
-
-DOĞRU ÖRNEKLER:
-✓ "📰 Transfer | GS"
-✓ "🎙️ Açıklama | FB"
-✓ "⚽ Maç | BJK-GS"
-✓ "🏛️ Yönetim | FB"
-✓ "🩹 Sakatlık | TS"
-✓ "📌 Gündem | TR"
-
-YANLIŞ ÖRNEKLER (ASLA YAZMA):
-✗ "🌱 Zemin, kupaya müsait"      (kategori yok, takım yok)
-✗ "Galatasaray transfer haberi"   (emoji yok)
-✗ "📰 GS"                          (kategori adı yok)
-✗ "Transfer | GS"                  (emoji yok)
-
-KURAL: Etiket alanına yaratıcı cümle, açıklama veya orijinal tweet metni KOYMA. Sadece yukarıdaki 6+1 format kalıbından birini kullan.
+- Tweet alanı 230 karakteri AŞMASIN.
 
 ==================== MÜKERRER KONTROLÜ ====================
 Aşağıdakilerle aynı konuyu işleyen yeni haberi ATLA:
@@ -252,7 +222,7 @@ Aşağıdakilerle aynı konuyu işleyen yeni haberi ATLA:
 ==================== ÇIKTI FORMATI ====================
 SADECE bir JSON array döndür. Açıklama, markdown, ön söz YOK:
 [
-  {{"id": 0, "decision": "PAYLAS", "tweet": "...", "etiket": "📰 Transfer | GS"}},
+  {{"id": 0, "decision": "PAYLAS", "tweet": "..."}},
   {{"id": 1, "decision": "ATLA"}}
 ]"""
 
@@ -329,15 +299,12 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
             continue
         if decision in ("PAYLAS", "PAYLAŞ"):
             tweet_text = (res.get("tweet") or "").strip()
-            etiket = (res.get("etiket") or "").strip()
             if not tweet_text:
                 continue
-            etiket = _validate_etiket(etiket)
             item = news_items[idx]
             processed.append({
                 "title": item['title'],
                 "tweet": tweet_text,
-                "etiket": etiket,
                 "link": item['link'],
                 "published_date": item.get('published_date', time.strftime('%Y-%m-%d %H:%M:%S'))
             })
