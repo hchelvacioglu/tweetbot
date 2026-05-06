@@ -33,6 +33,21 @@ def make_video_embed_url(tweet_url: str) -> str:
     clean = clean.rstrip('/')
     return f"{clean}/video/1"
 
+def make_photo_embed_url(tweet_url: str) -> str:
+    """
+    Tweet URL'sini /photo/1 formatına çevirir.
+    Query parametrelerini temizler (?s=20 vb).
+    Mantık make_video_embed_url ile aynı, sadece ek "/photo/1".
+
+    Örnek:
+      https://x.com/user/status/123?s=20  →  https://x.com/user/status/123/photo/1
+    """
+    if not tweet_url:
+        return ""
+    clean = tweet_url.split('?')[0].split('#')[0]
+    clean = clean.rstrip('/')
+    return f"{clean}/photo/1"
+
 def _get_headers():
     return {
         "Authorization": f"Bearer {os.getenv('GETXAPI_KEY')}",

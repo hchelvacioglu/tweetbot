@@ -100,6 +100,15 @@ def get_media_type(tweet: dict) -> str:
         return 'photo'
     return 'none'
 
+def has_tco_in_original(tweet: dict) -> bool:
+    """
+    Orijinal tweet metninde t.co linki var mı?
+    Eğer varsa, AI o linki aktarır ve Twitter otomatik kart açar.
+    Yoksa bot manuel olarak /photo/1 eklemelidir.
+    """
+    text = tweet.get('text', '') or tweet.get('full_text', '') or ''
+    return 't.co/' in text
+
 def is_quote_of_quote(tweet: dict) -> bool:
     qt = tweet.get('quoted_tweet')
     return qt is not None and isinstance(qt, dict) and bool(qt)
@@ -275,12 +284,17 @@ def twitter_collector_job():
 
         media_type = get_media_type(tweet)
         is_qoq = is_quote_of_quote(tweet)
+        has_link_in_text = has_tco_in_original(tweet)
 
         # Karar:
-        # - Video/GIF + qoq değil → video_embed (Faz 5)
-        # - Diğer hepsi (görsel, medya yok, qoq) → text
+        # - Video/GIF + qoq değil → video_embed (Faz 5: /video/1)
+        # - Foto + qoq değil + t.co YOKSA → photo_embed (Faz 7: /photo/1)
+        # - Foto + qoq değil + t.co VARSA → text (AI t.co aktarır, Twitter kart açar)
+        # - Diğer (medya yok, qoq) → text
         if media_type in ('video', 'gif') and not is_qoq:
             share_decision = 'video_embed'
+        elif media_type == 'photo' and not is_qoq and not has_link_in_text:
+            share_decision = 'photo_embed'
         else:
             share_decision = 'text'
 
@@ -330,6 +344,7 @@ def twitter_collector_job():
 
     saved_count = 0
     video_embed_count = 0
+    photo_embed_count = 0
     text_count = 0
     for i in range(0, len(pending_items), AI_BATCH_SIZE):
         batch = pending_items[i:i + AI_BATCH_SIZE]
@@ -408,7 +423,7 @@ def twitter_collector_job():
                 base_text = f"{base_text} (@{source_username})"
 
             if share_decision == 'video_embed' and tweet_url:
-                # Faz 5: text + /video/1 URL
+                # Faz 5: AI metninin sonuna /video/1 URL ekle
                 video_url = twitter_manager.make_video_embed_url(tweet_url)
                 full_text = f"{base_text} {video_url}"
                 ok = database.add_pending_tweet(
@@ -418,8 +433,19 @@ def twitter_collector_job():
                 )
                 if ok:
                     video_embed_count += 1
+            elif share_decision == 'photo_embed' and tweet_url:
+                # Faz 7: AI metninin sonuna /photo/1 URL ekle
+                photo_url = twitter_manager.make_photo_embed_url(tweet_url)
+                full_text = f"{base_text} {photo_url}"
+                ok = database.add_pending_tweet(
+                    title=res['title'], link=res['link'], published_date=res['published_date'],
+                    tweet_content=full_text,
+                    share_type='photo_embed'
+                )
+                if ok:
+                    photo_embed_count += 1
             else:
-                # Text tweet (medya yok veya görsel)
+                # Text: medya yok, görsel ama t.co var, veya qoq
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
                     tweet_content=base_text,
@@ -431,7 +457,8 @@ def twitter_collector_job():
             if ok:
                 saved_count += 1
                 recent_titles.append(res['title'])
-                marker = "🎬" if share_decision == 'video_embed' else "📝"
+                markers = {'video_embed': '🎬', 'photo_embed': '📷', 'text': '📝'}
+                marker = markers.get(share_decision, '📝')
                 logger.info(f"[Collector] {marker} Kuyruğa: {res['title'][:60]}")
 
         if i + AI_BATCH_SIZE < len(pending_items):
@@ -439,7 +466,7 @@ def twitter_collector_job():
 
     logger.info(
         f"[Collector] Bitti. {saved_count} yeni tweet "
-        f"(video: {video_embed_count}, text: {text_count})."
+        f"(video: {video_embed_count}, foto: {photo_embed_count}, text: {text_count})."
     )
 
 # ============================================================
