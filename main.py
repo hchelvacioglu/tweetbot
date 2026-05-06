@@ -367,12 +367,25 @@ def twitter_collector_job():
             # AI'dan gelen tweet metni (orijinal kaynak metnin sıkıştırılmış hali)
             base_text = res['tweet'].strip()
 
-            # Kaynak ekle — ama sadece base_text'in sonunda zaten parantezli kaynak yoksa.
-            # AI bazen "(Sözcü)" veya "(Nevzat Dindar)" gibi kaynak ekliyor; çift kaynak olmasın.
+            # Kaynak ekleme kontrolleri
             import re
+
+            # 1. Sonunda zaten parantezli kaynak var mı? (örn. "(Sözcü)", "(Nevzat Dindar)")
             has_existing_source = bool(re.search(r'\([^)]+\)\s*$', base_text))
 
-            if source_username and f"@{source_username}" not in base_text and not has_existing_source:
+            # 2. Tweet "İsim:" veya "İsim Soyisim:" formatında başlıyor mu?
+            # Bu durumda kaynak isim zaten açık, @kullanıcı eklemeye gerek yok.
+            # Pattern: 1-3 kelimeli, her kelime büyük harfle başlayan, sonu : olan başlangıç
+            starts_with_named_quote = bool(re.match(
+                r'^[A-ZÇĞİÖŞÜ][a-zA-ZçğıöşüÇĞİÖŞÜ\.]+(\s+[A-ZÇĞİÖŞÜ][a-zA-ZçğıöşüÇĞİÖŞÜ\.]+){0,2}\s*:',
+                base_text
+            ))
+
+            # Sadece (a) parantezli kaynak yoksa VE (b) "İsim:" başlangıcı yoksa @username ekle
+            if (source_username
+                and f"@{source_username}" not in base_text
+                and not has_existing_source
+                and not starts_with_named_quote):
                 base_text = f"{base_text} (@{source_username})"
 
             if share_decision == 'video_embed' and tweet_url:
