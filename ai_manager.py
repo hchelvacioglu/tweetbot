@@ -54,21 +54,64 @@ def _validate_etiket(etiket: str) -> str:
 # ============================================================
 AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()
 
-if AI_PROVIDER == "gemini":
+# Gemini client (mevcut anahtar varsa)
+try:
     from google import genai as genai_new
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     _gemini_client = genai_new.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-    logger.info(f"AI provider: Gemini ({GEMINI_MODEL})")
-else:
+except ImportError:
+    _gemini_client = None
+    GEMINI_MODEL = None
+
+# Groq client (mevcut anahtar varsa)
+try:
     from groq import Groq
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     _groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-    GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    logger.info(f"AI provider: Groq ({GROQ_MODEL})")
+    GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+except ImportError:
+    _groq_client = None
+    GROQ_MODEL = None
+
+available = []
+if _gemini_client:
+    available.append(f"Gemini ({GEMINI_MODEL})")
+if _groq_client:
+    available.append(f"Groq ({GROQ_MODEL})")
+logger.info(f"AI providers yüklü: {', '.join(available) or 'HİÇBİRİ'}")
+logger.info(f"Öncelikli provider: {AI_PROVIDER}")
+
 
 class AIQuotaExceeded(Exception):
+    """429: Gerçek kota dolması — 1 saat dondur."""
     pass
+
+class AIPromptTooLarge(Exception):
+    """413: Prompt veya output sınırı aştı — batch'i yarıla."""
+    pass
+
+class AIModelDeprecated(Exception):
+    """400: Model artık desteklenmiyor — fallback dene."""
+    pass
+
+class AITransientError(Exception):
+    """502/503/504/timeout: Geçici sorun — kısa retry sonrası fallback."""
+    pass
+
+
+def _classify_error(err_str: str):
+    """Hata mesajından doğru exception sınıfını döner."""
+    err_lower = err_str.lower()
+    if "429" in err_str or "rate_limit" in err_lower or "resource_exhausted" in err_lower or "tokens per day" in err_lower or "quota" in err_lower:
+        return AIQuotaExceeded
+    if "413" in err_str or "too large" in err_lower or "payload too large" in err_lower:
+        return AIPromptTooLarge
+    if "decommissioned" in err_lower or "deprecated" in err_lower or "no longer supported" in err_lower or "model_decommissioned" in err_lower:
+        return AIModelDeprecated
+    if "503" in err_str or "502" in err_str or "504" in err_str or "timeout" in err_lower or "unavailable" in err_lower:
+        return AITransientError
+    return None
 
 # ============================================================
 # LLM Çağrıları
@@ -93,9 +136,17 @@ def _call_groq(prompt: str) -> str:
         except Exception as e:
             err_str = str(e)
             last_err = e
-            if "429" in err_str or "rate_limit" in err_str.lower() or "quota" in err_str.lower():
-                logger.error(f"Groq quota exceeded (no retry): {err_str[:200]}")
+            error_class = _classify_error(err_str)
+            if error_class is AIQuotaExceeded:
+                logger.error(f"Groq quota exceeded: {err_str[:200]}")
                 raise AIQuotaExceeded(err_str) from e
+            if error_class is AIPromptTooLarge:
+                logger.error(f"Groq 413 prompt too large: {err_str[:200]}")
+                raise AIPromptTooLarge(err_str) from e
+            if error_class is AIModelDeprecated:
+                logger.error(f"Groq model deprecated: {err_str[:200]}")
+                raise AIModelDeprecated(err_str) from e
+            # Diğer (transient veya unknown): retry yap
             logger.warning(f"Groq error attempt {attempt+1}: {err_str[:200]}")
             if attempt < len(backoff) - 1:
                 time.sleep(delay)
@@ -144,18 +195,77 @@ def _call_gemini(prompt: str) -> str:
         except Exception as e:
             err_str = str(e)
             last_err = e
-            if "429" in err_str or "quota" in err_str.lower() or "ResourceExhausted" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                logger.error(f"Gemini quota exceeded (no retry): {err_str[:200]}")
+            error_class = _classify_error(err_str)
+            if error_class is AIQuotaExceeded:
+                logger.error(f"Gemini quota exceeded: {err_str[:200]}")
                 raise AIQuotaExceeded(err_str) from e
+            if error_class is AIPromptTooLarge:
+                logger.error(f"Gemini 413 prompt too large: {err_str[:200]}")
+                raise AIPromptTooLarge(err_str) from e
+            if error_class is AIModelDeprecated:
+                logger.error(f"Gemini model deprecated: {err_str[:200]}")
+                raise AIModelDeprecated(err_str) from e
+            # Diğer (transient veya unknown): retry yap
             logger.warning(f"Gemini error attempt {attempt+1}: {err_str[:200]}")
             if attempt < len(backoff) - 1:
                 time.sleep(delay)
     raise last_err
 
-def _call_llm(prompt: str) -> str:
+def _get_provider_chain():
+    """Env'deki provider'a göre fallback zinciri kur."""
     if AI_PROVIDER == "gemini":
+        return ["gemini", "groq"]
+    return ["groq", "gemini"]
+
+
+def _call_provider(provider: str, prompt: str) -> str:
+    """Belirli bir provider'a çağrı yap."""
+    if provider == "gemini":
+        if not _gemini_client:
+            raise RuntimeError("Gemini client yok (GEMINI_API_KEY eksik?)")
         return _call_gemini(prompt)
-    return _call_groq(prompt)
+    elif provider == "groq":
+        if not _groq_client:
+            raise RuntimeError("Groq client yok (GROQ_API_KEY eksik?)")
+        return _call_groq(prompt)
+    else:
+        raise ValueError(f"Bilinmeyen provider: {provider}")
+
+
+def _call_llm(prompt: str) -> str:
+    """Provider chain ile çağrı yap. Biri kotada ise sonrakine geç."""
+    chain = _get_provider_chain()
+    last_quota_error = None
+    last_other_error = None
+
+    for provider in chain:
+        try:
+            logger.info(f"AI çağrısı: {provider}")
+            return _call_provider(provider, prompt)
+        except AIQuotaExceeded as e:
+            logger.warning(f"{provider} kotası dolu, fallback denenecek")
+            last_quota_error = e
+            continue
+        except AIPromptTooLarge as e:
+            logger.warning(f"{provider} 413 prompt too large, fallback denenecek")
+            last_other_error = e
+            continue
+        except AIModelDeprecated as e:
+            logger.warning(f"{provider} modeli deprecated, fallback denenecek")
+            last_other_error = e
+            continue
+        except RuntimeError as e:
+            logger.warning(f"{provider} kullanılamıyor: {e}")
+            last_other_error = e
+            continue
+
+    # Tüm provider'lar başarısız
+    if last_quota_error:
+        logger.error("Tüm provider'lar kotada — bot 1 saat dondurulacak")
+        raise last_quota_error
+    if last_other_error:
+        raise last_other_error
+    raise RuntimeError("Hiçbir provider çalıştırılamadı")
 
 # ============================================================
 # Prompt — Faz 2 (A filtre + söz aktarımı koruması)
@@ -251,6 +361,15 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
         response_text = _call_llm(prompt)
     except AIQuotaExceeded:
         raise
+    except AIPromptTooLarge:
+        if len(news_items) <= 1:
+            logger.error("Tek haberle bile 413 — prompt yapısal olarak büyük")
+            return []
+        half = len(news_items) // 2
+        logger.warning(f"Batch 413 — bölünüyor: {len(news_items)} → {half}+{len(news_items)-half}")
+        first_half = process_news_batch(news_items[:half], recent_titles)
+        second_half = process_news_batch(news_items[half:], recent_titles)
+        return first_half + second_half
     except Exception as e:
         logger.error(f"AI call failed: {e}")
         return []
