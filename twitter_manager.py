@@ -65,28 +65,60 @@ def get_recent_tweets(username: str, count: int = 20) -> List[Dict]:
         logger.error(f"get_recent_tweets({username}) network error: {e}")
         return []
 
-def get_list_tweets(list_id: str, count: int = 40) -> List[Dict]:
+def get_list_tweets(list_id: str, count: int = 60) -> List[Dict]:
     """
-    Twitter listesinden son tweet'leri getirir.
-    GetXAPI 'q' ve 'count' parametrelerini bekliyor (canlıda doğrulandı).
+    Twitter listesinden son tweet'leri pagination ile getirir.
+    Hedef tweet sayısına ulaşana kadar veya max sayfaya kadar döner.
+    Dedup uygulanır (aynı tweet_id 2x gelirse atılır).
     """
+    MAX_PAGES = 3
+    all_tweets = []
+    seen_ids = set()
+    cursor = None
+
     try:
-        url = f"{GETXAPI_BASE_URL}/twitter/tweet/advanced_search"
-        params = {
-            "q": f"list:{list_id}",
-            "count": count
-        }
-        response = requests.get(url, headers=_get_headers(), params=params, timeout=20)
-        if response.status_code >= 400:
-            _log_response_error(f"get_list_tweets({list_id}) failed", response)
-            return []
-        data = response.json()
-        tweets = data.get("tweets", [])
-        logger.info(f"List {list_id}: {len(tweets)} tweet alındı.")
-        return tweets
+        for page in range(MAX_PAGES):
+            url = f"{GETXAPI_BASE_URL}/twitter/tweet/advanced_search"
+            params = {
+                "q": f"list:{list_id}",
+                "count": 20
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            response = requests.get(url, headers=_get_headers(), params=params, timeout=20)
+            if response.status_code >= 400:
+                _log_response_error(f"get_list_tweets({list_id}) page {page+1} failed", response)
+                break
+
+            data = response.json()
+            page_tweets = data.get("tweets", [])
+            if not page_tweets:
+                break
+
+            new_count = 0
+            for tweet in page_tweets:
+                tweet_id = tweet.get('id') or tweet.get('id_str') or tweet.get('tweet_id')
+                if tweet_id and tweet_id not in seen_ids:
+                    seen_ids.add(tweet_id)
+                    all_tweets.append(tweet)
+                    new_count += 1
+
+            logger.info(f"List {list_id} sayfa {page+1}: {len(page_tweets)} geldi, {new_count} yeni (toplam {len(all_tweets)})")
+
+            if len(all_tweets) >= count:
+                break
+
+            cursor = data.get("next_cursor")
+            has_more = data.get("has_more", False)
+            if not cursor or not has_more:
+                break
+
+        logger.info(f"List {list_id}: toplam {len(all_tweets)} tweet alındı ({page+1} sayfa).")
+        return all_tweets[:count]
     except requests.exceptions.RequestException as e:
         logger.error(f"get_list_tweets({list_id}) network error: {e}")
-        return []
+        return all_tweets
 
 # ============================================================
 # READ — Engagement Metrics (Faz 2 yeni)
