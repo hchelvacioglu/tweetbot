@@ -104,6 +104,27 @@ def is_quote_of_quote(tweet: dict) -> bool:
     qt = tweet.get('quoted_tweet')
     return qt is not None and isinstance(qt, dict) and bool(qt)
 
+def get_hour_thresholds() -> dict:
+    """
+    Türkiye saatine göre filtre eşiklerini döner.
+    Saat dilimleri:
+    - 22-06: Gece (sessiz saatler, gevşek eşikler)
+    - 06-10: Sabah (transfer patlaması, gevşek eşikler)
+    - 10-16: Gündüz (normal akış)
+    - 16-22: Akşam (yoğun trafik, sıkı eşikler)
+    """
+    utc_hour = datetime.datetime.utcnow().hour
+    tr_hour = (utc_hour + 3) % 24
+
+    if 6 <= tr_hour < 10:
+        return {'profil': 'sabah',  'tr_hour': tr_hour, 'min_likes': 10, 'rt_ratio': 0.005, 'reply_ratio': 0.05,  'interest': 0.10}
+    if 10 <= tr_hour < 16:
+        return {'profil': 'gündüz', 'tr_hour': tr_hour, 'min_likes': 15, 'rt_ratio': 0.01,  'reply_ratio': 0.10,  'interest': 0.15}
+    if 16 <= tr_hour < 22:
+        return {'profil': 'akşam',  'tr_hour': tr_hour, 'min_likes': 25, 'rt_ratio': 0.015, 'reply_ratio': 0.12,  'interest': 0.20}
+    return     {'profil': 'gece',   'tr_hour': tr_hour, 'min_likes': 8,  'rt_ratio': 0.003, 'reply_ratio': 0.05,  'interest': 0.08}
+
+
 def get_rate_threshold(followers: int) -> float:
     if followers < 10_000:
         return 0.003
@@ -120,12 +141,14 @@ def should_collect(tweet: dict) -> tuple:
     author = tweet.get('author') or {}
     followers = author.get('followers', 0) or 0
 
-    if likes < 15:
+    th = get_hour_thresholds()
+
+    if likes < th['min_likes']:
         return (False, "low_likes")
 
     rt_ratio = retweets / likes if likes > 0 else 0
     reply_ratio = replies / likes if likes > 0 else 0
-    if rt_ratio < 0.01 and reply_ratio < 0.10:
+    if rt_ratio < th['rt_ratio'] and reply_ratio < th['reply_ratio']:
         return (False, "no_news_signal")
 
     if followers > 0:
@@ -135,7 +158,7 @@ def should_collect(tweet: dict) -> tuple:
             return (True, "engagement_rate")
 
     interest = (retweets * 3 + replies) / likes if likes > 0 else 0
-    if interest >= 0.15:
+    if interest >= th['interest']:
         return (True, "interest_score")
 
     return (False, "low_quality")
@@ -199,7 +222,12 @@ def twitter_collector_job():
         logger.info(f"[Collector] AI kotası kilitli, {remaining:.0f} dk sonra tekrar denenecek.")
         return
 
-    logger.info(f"[Collector] Başlıyor... (ATLA cache: {len(_atlanan_hashes)} hash)")
+    th = get_hour_thresholds()
+    logger.info(
+        f"[Collector] Başlıyor... (ATLA cache: {len(_atlanan_hashes)} hash, "
+        f"profil: {th['profil']} TR{th['tr_hour']:02d}:xx, "
+        f"min_likes: {th['min_likes']})"
+    )
     recent_titles = database.get_recent_news_titles(hours=12)
 
     tweets = twitter_manager.get_list_tweets(TWITTER_LIST_ID, count=60)
