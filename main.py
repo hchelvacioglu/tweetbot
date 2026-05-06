@@ -339,10 +339,13 @@ def twitter_collector_job():
             # AI'dan gelen tweet metni (orijinal kaynak metnin sıkıştırılmış hali)
             base_text = res['tweet'].strip()
 
-            # Kaynak ekle (eğer base_text içinde zaten yoksa)
-            if source_username and f"@{source_username}" not in base_text:
-                if not base_text.endswith(')'):
-                    base_text = f"{base_text} (@{source_username})"
+            # Kaynak ekle — ama sadece base_text'in sonunda zaten parantezli kaynak yoksa.
+            # AI bazen "(Sözcü)" veya "(Nevzat Dindar)" gibi kaynak ekliyor; çift kaynak olmasın.
+            import re
+            has_existing_source = bool(re.search(r'\([^)]+\)\s*$', base_text))
+
+            if source_username and f"@{source_username}" not in base_text and not has_existing_source:
+                base_text = f"{base_text} (@{source_username})"
 
             if share_decision == 'video_embed' and tweet_url:
                 # Faz 5: text + /video/1 URL
