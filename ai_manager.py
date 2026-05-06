@@ -74,9 +74,24 @@ except ImportError:
     _groq_client = None
     GROQ_MODEL = None
 
+# OpenRouter client (mevcut anahtar varsa) — OpenAI-compatible API
+try:
+    from openai import OpenAI as OpenRouterClient
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
+    _openrouter_client = OpenRouterClient(
+        api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1"
+    ) if OPENROUTER_API_KEY else None
+except ImportError:
+    _openrouter_client = None
+    OPENROUTER_MODEL = None
+
 available = []
 if _gemini_client:
     available.append(f"Gemini ({GEMINI_MODEL})")
+if _openrouter_client:
+    available.append(f"OpenRouter ({OPENROUTER_MODEL})")
 if _groq_client:
     available.append(f"Groq ({GROQ_MODEL})")
 logger.info(f"AI providers yüklü: {', '.join(available) or 'HİÇBİRİ'}")
@@ -211,11 +226,66 @@ def _call_gemini(prompt: str) -> str:
                 time.sleep(delay)
     raise last_err
 
+def _call_openrouter(prompt: str) -> str:
+    """OpenRouter üzerinden gpt-oss-120b free model çağrısı."""
+    backoff = [1, 2, 4]
+    last_err = None
+
+    for attempt, delay in enumerate(backoff):
+        try:
+            response = _openrouter_client.chat.completions.create(
+                model=OPENROUTER_MODEL,
+                messages=[
+                    {"role": "system", "content": "JSON yanıt veren Türkçe haber asistanı."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=8192,
+                extra_headers={
+                    "HTTP-Referer": "https://x.com/FlasFutbool",
+                    "X-Title": "FlasFutbol Bot"
+                }
+            )
+
+            content = response.choices[0].message.content
+            if content is None:
+                logger.warning("OpenRouter raw: content=None (model belki reasoning model)")
+                last_err = ValueError("OpenRouter empty response")
+                if attempt < len(backoff) - 1:
+                    time.sleep(delay)
+                continue
+
+            in_tokens = response.usage.prompt_tokens if response.usage else 0
+            out_tokens = response.usage.completion_tokens if response.usage else 0
+            logger.info(f"OpenRouter raw: len={len(content)} tokens(in={in_tokens}, out={out_tokens})")
+
+            return content
+
+        except Exception as e:
+            err_str = str(e)
+            last_err = e
+            error_class = _classify_error(err_str)
+            if error_class is AIQuotaExceeded:
+                logger.error(f"OpenRouter quota exceeded: {err_str[:200]}")
+                raise AIQuotaExceeded(err_str) from e
+            if error_class is AIPromptTooLarge:
+                logger.error(f"OpenRouter 413 prompt too large: {err_str[:200]}")
+                raise AIPromptTooLarge(err_str) from e
+            if error_class is AIModelDeprecated:
+                logger.error(f"OpenRouter model deprecated: {err_str[:200]}")
+                raise AIModelDeprecated(err_str) from e
+            logger.warning(f"OpenRouter error attempt {attempt+1}: {err_str[:200]}")
+            if attempt < len(backoff) - 1:
+                time.sleep(delay)
+
+    raise RuntimeError(f"OpenRouter failed after retries: {last_err}")
+
 def _get_provider_chain():
-    """Env'deki provider'a göre fallback zinciri kur."""
+    """Env'deki provider'a göre fallback zinciri kur. OpenRouter middle olarak girer."""
     if AI_PROVIDER == "gemini":
-        return ["gemini", "groq"]
-    return ["groq", "gemini"]
+        return ["gemini", "openrouter", "groq"]
+    if AI_PROVIDER == "openrouter":
+        return ["openrouter", "gemini", "groq"]
+    return ["groq", "openrouter", "gemini"]
 
 
 def _call_provider(provider: str, prompt: str) -> str:
@@ -224,6 +294,10 @@ def _call_provider(provider: str, prompt: str) -> str:
         if not _gemini_client:
             raise RuntimeError("Gemini client yok (GEMINI_API_KEY eksik?)")
         return _call_gemini(prompt)
+    elif provider == "openrouter":
+        if not _openrouter_client:
+            raise RuntimeError("OpenRouter client yok (OPENROUTER_API_KEY eksik?)")
+        return _call_openrouter(prompt)
     elif provider == "groq":
         if not _groq_client:
             raise RuntimeError("Groq client yok (GROQ_API_KEY eksik?)")
