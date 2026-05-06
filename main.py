@@ -370,18 +370,37 @@ def twitter_collector_job():
             # Kaynak ekleme kontrolleri
             import re
 
-            # 1. Sonunda zaten parantezli kaynak var mı? (örn. "(Sözcü)", "(Nevzat Dindar)")
-            has_existing_source = bool(re.search(r'\([^)]+\)\s*$', base_text))
+            # 1a. Tweet'in SONUNDA zaten parantezli ifade var mı? (genel kontrol)
+            has_source_at_end = bool(re.search(r'\([^)]+\)\s*$', base_text))
+
+            # 1b. Tweet'in HERHANGI YERİNDE bilinen Türk medya kaynağı veya gazeteci adı parantezli mi?
+            KNOWN_SOURCES = (
+                r'Takvim|Sözcü|Hürriyet|Sabah|Fanatik|Milliyet|Star|Posta|Türkiye|Akşam|'
+                r'CNN Türk|NTV|Habertürk|A Spor|TRT|TRT Spor|Show TV|Kanal D|ATV|FOX|'
+                r'Fotomaç|Fotospor|AMK|Ajansspor|beIN Sports|S Sport|Eurosport|Tivibu|'
+                r'Anadolu Ajansı|İHA|DHA|AA|Sky Sport|Tuttosport|Gazzetta|L\'Equipe|'
+                r'Goal|ESPN|BBC|Telegraph|Mirror|Sun|Marca|AS|Bild|Kicker'
+            )
+            # @username ve bilinen medya: case-insensitive
+            media_pattern = re.compile(
+                rf'\(\s*(?:@\w+|{KNOWN_SOURCES})\s*\)',
+                re.IGNORECASE
+            )
+            # Ad Soyad: case-sensitive — küçük harfli "(orta saha)" gibi ifadeler eşleşmesin
+            ad_soyad_pattern = re.compile(
+                r'\(\s*[A-ZÇĞİÖŞÜ][a-zçğıöşüA-ZÇĞİÖŞÜ\.]+\s+[A-ZÇĞİÖŞÜ][a-zçğıöşüA-ZÇĞİÖŞÜ\.]+\s*\)'
+            )
+            has_known_source_anywhere = bool(media_pattern.search(base_text)) or bool(ad_soyad_pattern.search(base_text))
+
+            has_existing_source = has_source_at_end or has_known_source_anywhere
 
             # 2. Tweet "İsim:" veya "İsim Soyisim:" formatında başlıyor mu?
-            # Bu durumda kaynak isim zaten açık, @kullanıcı eklemeye gerek yok.
-            # Pattern: 1-3 kelimeli, her kelime büyük harfle başlayan, sonu : olan başlangıç
             starts_with_named_quote = bool(re.match(
                 r'^[A-ZÇĞİÖŞÜ][a-zA-ZçğıöşüÇĞİÖŞÜ\.]+(\s+[A-ZÇĞİÖŞÜ][a-zA-ZçğıöşüÇĞİÖŞÜ\.]+){0,2}\s*:',
                 base_text
             ))
 
-            # Sadece (a) parantezli kaynak yoksa VE (b) "İsim:" başlangıcı yoksa @username ekle
+            # @username sadece eklenir eğer: kaynak yok + "İsim:" başlangıcı yok
             if (source_username
                 and f"@{source_username}" not in base_text
                 and not has_existing_source
