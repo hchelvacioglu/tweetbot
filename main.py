@@ -286,14 +286,16 @@ def twitter_collector_job():
         is_qoq = is_quote_of_quote(tweet)
         has_link_in_text = has_tco_in_original(tweet)
 
-        # Karar:
-        # - Video/GIF + qoq değil → video_embed (Faz 5: /video/1)
-        # - Foto + qoq değil + t.co YOKSA → photo_embed (Faz 7: /photo/1)
-        # - Foto + qoq değil + t.co VARSA → text (AI t.co aktarır, Twitter kart açar)
-        # - Diğer (medya yok, qoq) → text
-        if media_type in ('video', 'gif') and not is_qoq:
+        # Karar (Faz 7 hot fix 5 — quote bug fix):
+        # Üst tweetin KENDİ medyası varsa, quote olması engelleyici DEĞİL.
+        # Bot media_type'a göre embed yapar (quote arka planda kalır).
+        # - Video/GIF varsa → video_embed (Faz 5: /video/1)
+        # - Foto varsa + t.co YOKSA → photo_embed (Faz 7: /photo/1)
+        # - Foto varsa + t.co VARSA → text (AI t.co aktarır, Twitter kart açar)
+        # - Medyası yok → text
+        if media_type in ('video', 'gif'):
             share_decision = 'video_embed'
-        elif media_type == 'photo' and not is_qoq and not has_link_in_text:
+        elif media_type == 'photo' and not has_link_in_text:
             share_decision = 'photo_embed'
         else:
             share_decision = 'text'
