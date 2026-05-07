@@ -452,7 +452,7 @@ def twitter_collector_job():
                     video_url = expanded.split('?')[0]
                 else:
                     video_url = twitter_manager.make_video_embed_url(tweet_url)
-                full_text = f"{base_text} {video_url}"
+                full_text = f"{video_url} {base_text}"
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
                     tweet_content=full_text,
@@ -467,7 +467,7 @@ def twitter_collector_job():
                     photo_url = expanded.split('?')[0]
                 else:
                     photo_url = twitter_manager.make_photo_embed_url(tweet_url)
-                full_text = f"{base_text} {photo_url}"
+                full_text = f"{photo_url} {base_text}"
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
                     tweet_content=full_text,
