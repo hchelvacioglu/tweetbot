@@ -100,6 +100,24 @@ def get_media_type(tweet: dict) -> str:
         return 'photo'
     return 'none'
 
+def get_media_expanded_url(tweet: dict) -> str:
+    """
+    Tweet'in media[0].expanded_url'sini döner. Bu URL Twitter tarafından zaten
+    /video/1 veya /photo/1 ile biten doğru kaynak URL'si.
+
+    Önemli: bbosports gibi hesaplar başka tweet'ten video embed edebilir.
+    Bu durumda expanded_url ALT kaynağa (orijinal video sahibine) işaret eder.
+    Bot kendi URL'si yerine bunu kullanmalı, yoksa video kırık görünür.
+
+    Returns: expanded URL veya boş string
+    """
+    media = tweet.get('media') or []
+    if not isinstance(media, list) or len(media) == 0:
+        return ''
+    first = media[0] if isinstance(media[0], dict) else {}
+    expanded = first.get('expanded_url') or ''
+    return expanded.strip()
+
 def has_tco_in_original(tweet: dict) -> bool:
     """
     Orijinal tweet metninde t.co linki var mı?
@@ -431,8 +449,13 @@ def twitter_collector_job():
                 base_text = f"{base_text} (@{source_username})"
 
             if share_decision == 'video_embed' and tweet_url:
-                # Faz 5: AI metninin sonuna /video/1 URL ekle
-                video_url = twitter_manager.make_video_embed_url(tweet_url)
+                # Faz 7 hot fix 11: media[0].expanded_url öncelikli (gerçek video kaynağı)
+                expanded = get_media_expanded_url(tweet)
+                if expanded and '/video/' in expanded:
+                    video_url = expanded.split('?')[0]
+                else:
+                    # Fallback: üst tweet URL'sine /video/1 ekle
+                    video_url = twitter_manager.make_video_embed_url(tweet_url)
                 full_text = f"{base_text} {video_url}"
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
@@ -442,8 +465,13 @@ def twitter_collector_job():
                 if ok:
                     video_embed_count += 1
             elif share_decision == 'photo_embed' and tweet_url:
-                # Faz 7: AI metninin sonuna /photo/1 URL ekle
-                photo_url = twitter_manager.make_photo_embed_url(tweet_url)
+                # Faz 7 hot fix 11: media[0].expanded_url öncelikli (gerçek foto kaynağı)
+                expanded = get_media_expanded_url(tweet)
+                if expanded and '/photo/' in expanded:
+                    photo_url = expanded.split('?')[0]
+                else:
+                    # Fallback: üst tweet URL'sine /photo/1 ekle
+                    photo_url = twitter_manager.make_photo_embed_url(tweet_url)
                 full_text = f"{base_text} {photo_url}"
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
