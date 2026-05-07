@@ -117,14 +117,17 @@ def init_db():
 
 def add_pending_tweet(title: str, link: str, published_date: str, tweet_content: str, share_type: str = 'text', quote_url: str = None) -> bool:
     h = make_hash(title)
+    # Hot Fix 19: created_at'i Python'dan TR saati olarak gönder.
+    # SQLite'ın DEFAULT CURRENT_TIMESTAMP UTC döner, biz local time istiyoruz.
+    now_local = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
         cursor.execute('''
             INSERT INTO Bekleyen_Tweetler
-                (title, link, published_date, tweet_content, status, content_hash, share_type, quote_url)
-            VALUES (?, ?, ?, ?, 'Bekliyor', ?, ?, ?)
-        ''', (title, link, published_date, tweet_content, h, share_type, quote_url))
+                (title, link, published_date, tweet_content, status, content_hash, share_type, quote_url, created_at)
+            VALUES (?, ?, ?, ?, 'Bekliyor', ?, ?, ?, ?)
+        ''', (title, link, published_date, tweet_content, h, share_type, quote_url, now_local))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
