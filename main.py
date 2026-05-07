@@ -221,8 +221,11 @@ def publisher_job():
     else:
         result = twitter_manager.post_tweet(content_to_post if isinstance(content_to_post, str) else "")
 
-    # result: ya str (tweet ID) ya True ya False
-    if result:
+    # result: ya str (tweet ID) ya True ya False ya "skip_too_long"
+    if result == "skip_too_long":
+        database.update_tweet_status(tweet_id, 'Failed')
+        logger.info(f"[Publisher] ⏭️ ID {tweet_id} 280+ karakter, GetXAPI çağrısı yapılmadı (para tasarrufu).")
+    elif result:
         if isinstance(result, str) and result:
             database.save_posted_tweet_id(tweet_id, result)
             logger.info(f"[Publisher] ✓ ID {tweet_id} ({share_type}) paylaşıldı (Twitter ID: {result}).")

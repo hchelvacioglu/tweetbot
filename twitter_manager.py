@@ -17,6 +17,7 @@ from typing import List, Dict, Optional, Tuple, Union
 logger = logging.getLogger(__name__)
 
 GETXAPI_BASE_URL = "https://api.getxapi.com"
+TWEET_HARD_LIMIT = 280  # GetXAPI auth token standart, 280 üstü 500 dönüyor
 
 def make_video_embed_url(tweet_url: str) -> str:
     """
@@ -181,6 +182,11 @@ def post_tweet(text: str, reply_to_id: str = None) -> Union[bool, str]:
     Faz 2: başarıda Twitter tweet ID'sini döner (string).
     Başarısızlıkta False döner. (Geri uyumlu — bool kontrolünde False çalışır.)
     """
+    # Hot Fix 14: 280+ karakterli tweet'leri atla (GetXAPI 500 dönüyor)
+    if len(text) >= TWEET_HARD_LIMIT:
+        logger.warning(f"⏭️ Tweet uzun (uzunluk={len(text)}, limit={TWEET_HARD_LIMIT}) — atlandı")
+        return "skip_too_long"
+
     try:
         url = f"{GETXAPI_BASE_URL}/twitter/tweet/create"
         payload = {
