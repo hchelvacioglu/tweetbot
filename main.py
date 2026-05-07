@@ -196,6 +196,11 @@ def should_collect(tweet: dict) -> tuple:
 # ============================================================
 
 def publisher_job():
+    # Hot Fix 16: Bayat tweet'leri temizle (30 dk üstü)
+    stale_count = database.cleanup_stale_pending_tweets(max_age_minutes=30)
+    if stale_count > 0:
+        logger.info(f"[Publisher] 🗑️ {stale_count} bayat tweet temizlendi (30+ dk eski, Basarisiz işaretlendi)")
+
     if is_night_time():
         logger.info("[Publisher] Gece modu (03-07), atlandı.")
         return

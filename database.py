@@ -298,11 +298,11 @@ def update_engagement(tweet_id: int, snapshot: str, likes: int, retweets: int, r
     """Belirli bir snapshot için metric değerlerini günceller."""
     if snapshot not in ('1h', '6h', '24h'):
         raise ValueError(f"Geçersiz snapshot: {snapshot}")
-    
+
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     now_iso = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    
+
     # Dynamic column name'ler — snapshot suffix ile
     cursor.execute(f'''
         UPDATE Engagement_Metrics
@@ -315,3 +315,32 @@ def update_engagement(tweet_id: int, snapshot: str, likes: int, retweets: int, r
     ''', (likes, retweets, replies, views, now_iso, tweet_id))
     conn.commit()
     conn.close()
+
+# ============================================================
+# Kuyruk Bakımı (Hot Fix 16)
+# ============================================================
+
+def cleanup_stale_pending_tweets(max_age_minutes: int = 30) -> int:
+    """
+    30 dk'dan eski 'Bekliyor' statusundaki tweet'leri 'Basarisiz' olarak işaretler.
+    Bayat haberlerin profile düşmesini engeller.
+
+    Returns: işaretlenen tweet sayısı
+    """
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=max_age_minutes)
+    cutoff_iso = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE Bekleyen_Tweetler
+            SET status = 'Basarisiz'
+            WHERE status = 'Bekliyor'
+            AND created_at < ?
+        """, (cutoff_iso,))
+        affected = cursor.rowcount
+        conn.commit()
+        return affected
+    finally:
+        conn.close()
