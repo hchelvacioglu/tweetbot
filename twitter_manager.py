@@ -194,6 +194,11 @@ def post_tweet(text: str, reply_to_id: str = None) -> Union[bool, str]:
         response = requests.post(url, headers=_get_headers(), json=payload, timeout=45)
 
         if response.status_code >= 400:
+            body_text = response.text or ""
+            # Faz 7 hot fix 6 — 187 duplicate = tweet zaten atılmış, başarılı say
+            if "187" in body_text or "duplicate" in body_text.lower():
+                logger.warning(f"⚠️ Duplicate (kod 187): tweet zaten atılmış sayılıyor | status={response.status_code}")
+                return "duplicate_already_posted"
             _log_response_error("post_tweet failed", response)
             return False
 
