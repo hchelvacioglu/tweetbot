@@ -385,8 +385,13 @@ def twitter_collector_job():
             # AI'dan gelen tweet metni (orijinal kaynak metnin sıkıştırılmış hali)
             base_text = res['tweet'].strip()
 
-            # Kaynak ekleme kontrolleri
+            # Faz 7 hot fix 10: AI batch işlerken t.co linklerini metne yapıştırıyor.
+            # Bot kendi /video/1 veya /photo/1 linkini zaten ekliyor — t.co'ları sil ki çift link olmasın.
             import re
+            base_text = re.sub(r'\s*https?://t\.co/\w+\s*', ' ', base_text).strip()
+            base_text = re.sub(r'\s+', ' ', base_text).strip()
+
+            # Kaynak ekleme kontrolleri
 
             # 1a. Tweet'in SONUNDA zaten parantezli ifade var mı? (genel kontrol)
             has_source_at_end = bool(re.search(r'\([^)]+\)\s*$', base_text))
