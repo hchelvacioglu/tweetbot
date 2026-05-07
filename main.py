@@ -313,12 +313,14 @@ def twitter_collector_job():
         # Üst tweetin KENDİ medyası varsa, quote olması engelleyici DEĞİL.
         # Bot media_type'a göre embed yapar (quote arka planda kalır).
         # - Video/GIF varsa → video_embed (Faz 5: /video/1)
-        # - Foto varsa + t.co YOKSA → photo_embed (Faz 7: /photo/1)
-        # - Foto varsa + t.co VARSA → text (AI t.co aktarır, Twitter kart açar)
+        # - Foto varsa → photo_embed (Faz 8 hot fix 15: has_tco_in_original kontrolü kaldırıldı)
         # - Medyası yok → text
         if media_type in ('video', 'gif'):
             share_decision = 'video_embed'
-        elif media_type == 'photo' and not has_link_in_text:
+        elif media_type == 'photo':
+            # Faz 8 hot fix 15: has_tco_in_original kontrolü kaldırıldı.
+            # Faz 8'de AI metin yazmıyor, hot fix 10 t.co'ları siliyor, hot fix 11 expanded_url
+            # kullanıyor — t.co kontrolü artık anlamsız ve foto'lu tweet'leri text'e atıyor (bug).
             share_decision = 'photo_embed'
         else:
             share_decision = 'text'
