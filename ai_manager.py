@@ -1,13 +1,9 @@
 """
-ai_manager.py — Faz 2 Güncellemesi
+ai_manager.py — Faz 8 Güncellemesi
 ==================================
-Faz 1'e ek olarak:
-- max_output_tokens 4000 → 8192 (Gemini truncation'ı çözmek için)
-- Yeni: response.usage_metadata loglanıyor (gerçek token sayısı görülsün)
-- Yeni: response.candidates[0].finish_reason kontrolü (MAX_TOKENS uyarısı görsel)
-- A filtre: dedikodu, başkan adayı, hakem haberleri geçer; sadece futbol-dışı + clickbait + yerel haber elenir
-- Söz aktarımı koruması: "İsim: 'söz'" yapısı bozulmaz
-- Prompt biraz daha kısa ve net (token tasarrufu için)
+Faz 8: AI artık metin üretmiyor — sadece PAYLAS/ATLA karar veriyor.
+Tweet metni orijinal kaynaktan alınıyor (halüsinasyon riski sıfır).
+AI_BATCH_SIZE 8 → 4 (daha küçük batch, daha az karışma).
 """
 
 import os
@@ -18,36 +14,6 @@ import logging
 from typing import List, Dict
 
 logger = logging.getLogger(__name__)
-
-# ============================================================
-# Etiket Validation
-# ============================================================
-
-_VALID_CATEGORIES = ('Transfer', 'Maç', 'Hakem', 'Yönetim', 'Açıklama', 'Sakatlık', 'Gündem')
-_VALID_TEAMS = ('GS', 'FB', 'BJK', 'TS', 'TR')
-
-def _validate_etiket(etiket: str) -> str:
-    """Etiket formatını doğrular. Geçersizse '📌 Gündem | TR' döner."""
-    if not etiket:
-        return "📌 Gündem | TR"
-    if '|' not in etiket:
-        return "📌 Gündem | TR"
-    parts = etiket.split('|', 1)
-    if len(parts) != 2:
-        return "📌 Gündem | TR"
-    left = parts[0].strip()
-    right = parts[1].strip()
-    # Sol taraf emoji ile başlamalı (ASCII değil)
-    if not left or left[0].isascii():
-        return "📌 Gündem | TR"
-    if not any(cat in left for cat in _VALID_CATEGORIES):
-        return "📌 Gündem | TR"
-    teams_in_right = [t.strip() for t in right.split('-')]
-    if not teams_in_right or not all(t in _VALID_TEAMS for t in teams_in_right):
-        return "📌 Gündem | TR"
-    if len(etiket) > 60:
-        return "📌 Gündem | TR"
-    return etiket
 
 # ============================================================
 # Provider seçimi
@@ -342,97 +308,46 @@ def _call_llm(prompt: str) -> str:
     raise RuntimeError("Hiçbir provider çalıştırılamadı")
 
 # ============================================================
-# Prompt — Faz 2 (A filtre + söz aktarımı koruması)
+# Prompt — Faz 8 (Sadece PAYLAS/ATLA — metin üretme yok)
 # ============================================================
 
-PROMPT_TEMPLATE = """Sen @FlasFutbool adlı X hesabının editörüsün. Türkiye'nin 4 BÜYÜK kulübüyle ilgili haberleri paylaşırsın: Galatasaray (GS), Fenerbahçe (FB), Beşiktaş (BJK), Trabzonspor (TS).
+SYSTEM_PROMPT = """Sen Türk futbolu odaklı bir filtreleme asistanısın.
+Sana 4 büyük takım (Galatasaray, Fenerbahçe, Beşiktaş, Trabzonspor) ile ilgili tweet'ler verilecek.
 
-==================== ATLA KURALLARI ====================
-ATLA olarak işaretle:
+Her tweet için sadece KARAR vereceksin:
+- "PAYLAS": Somut transfer haberi, açıklama, maç sonucu, sakatlık, başkanlık, yönetim, gerçek bir bilgi içeren haber
+- "ATLA": Eğlence, troll, sıradan yorum, futbol dışı konu, hakaret, anlamsız metin
 
-1) FUTBOL DIŞI SPORLAR: Voleybol, basketbol, tenis, atletizm, golf, motor sporları, dövüş sporları, e-spor.
-   Örnek atlanması gerekenler: "VakıfBank", "Zehra Güneş", "Anadolu Efes", "Fenerbahçe Beko" (basket), "Galatasaray Kadın Voleybol".
+ÖNEMLİ KURALLAR:
+- Tweet metnini değiştirme, özetleme, yeniden yazma. Sadece karar ver.
+- Sadece JSON dizisi yanıt ver, başka açıklama YAZMA.
 
-2) FUTBOL DIŞI HİÇBİR ŞEY: Trafik kazası, ölüm haberi (futbolcu hariç), siyaset, ekonomi, tarım, sağlık reklamı, iş ilanı, kumar/bahis tahmini, şehir haberleri, hava durumu.
-
-3) 4 BÜYÜKLER İLE BAĞLANTISIZ KULÜPLER: Samsunspor, Konyaspor vb. tek başına haber konusu olmaz. AMA 4 büyüklerden biriyle transfer/maç/karşılaşma bağlantısı varsa PAYLAŞ.
-
-4) İÇERİK GÜVENLİĞİ: Küfür, hakaret, ırkçı/cinsiyetçi/ayrımcı söylem, kişiyi hedef alan saldırgan dil ATLA.
-
-5) İÇERİĞİ BOŞ CLICKBAIT: "Yıldız isim", "O futbolcu", "Bomba isim" gibi somut bilgi (isim/olay) içermeyen başlıklar ATLA.
-   İSTİSNA: Detay metninde net isim varsa, tweet'e o ismi koyarak PAYLAŞ.
-
-6) SAF EĞLENCE / SELAMLAŞMA: "İyi sabahlar Cimbomlular", "Hadi BJK", "Günaydın Trabzonlular" gibi tek satırlık taraftarlık paylaşımları, mood paylaşımları, takım renkleriyle yapılan emojili coşku tweet'leri ATLA. Somut bilgi, isim, olay yoksa atla.
-   İSTİSNA: Futbolcunun KENDİ sosyal medya çıkışı veya açıklaması varsa PAYLAŞ.
-
-==================== PAYLAŞ KURALLARI (GENİŞ FİLTRE) ====================
-ŞUNLARIN HEPSİ PAYLAŞILABILIR (4 büyüklerle ilgili olmak şartıyla):
-- Transfer ve transfer dedikoduları
-- Maç sonuçları, kadro, taktik, sakatlık, ceza
-- Yönetim, başkan adaylığı, kongre, mali tablolar
-- Hakem atamaları, VAR kararları
-- Antrenör (teknik direktör) haberleri, ayrılık/yeni geliş
-- Futbolcu özel hayatı / sosyal medya çıkışları (eğer haber değeri varsa)
-- "🚨 ÖZEL", "FLAŞ" gibi haberler — somut bilgi varsa paylaş, içeriği boşsa atla
-- Milli takım haberleri 4 büyüklerden bir oyuncuyu içeriyorsa PAYLAŞ
-
-==================== TWEET YAZIM KURALLARI ====================
-ÖNEMLİ — KAYNAK METNİ ASLA DEĞİŞTİRME:
-- AI olarak tweet metnini ÜRETMİYORSUN. Sadece kaynak haberin metnini AKTAR.
-- Söz aktarımları varsa ("İsim: 'söz'") AYNEN koru.
-- Yorum cümleni eklemek YASAK.
-
-UZUNLUK:
-- Eğer kaynak metin 230 karakterden KISA ise: aynen aktar (tweet alanına olduğu gibi yaz).
-- Eğer kaynak metin 230 karakterden UZUN ise: anlamı bozmayacak şekilde 230 karaktere KISALT. Söz aktarımlarını bozma, isimleri çıkarma.
-
-KAYNAK BİLGİSİ:
-- Kaynak hesap kullanıcı adı kod tarafından otomatik eklenecek.
-- Eğer kaynak metinde zaten "(@kullaniciadi)" veya "(Hürriyet)" gibi parantezli kaynak varsa, ekleme; yoksa kod ekleyecek.
-- Tweet'ine kendin kaynak ekleme.
-
-DİĞER:
-- Emoji EKLEME (zaten varsa koruyabilirsin).
-- Tweet TÜRKÇE olsun.
-- Tweet alanı 230 karakteri AŞMASIN.
-
-==================== MÜKERRER KONTROLÜ ====================
-Aşağıdakilerle aynı konuyu işleyen yeni haberi ATLA:
-{recent_titles}
-
-==================== HABER LİSTESİ ====================
-{news_formatted}
-
-==================== ÇIKTI FORMATI ====================
-SADECE bir JSON array döndür. Açıklama, markdown, ön söz YOK:
+Yanıt formatı:
 [
-  {{"id": 0, "decision": "PAYLAS", "tweet": "..."}},
-  {{"id": 1, "decision": "ATLA"}}
+  {"id": 0, "decision": "PAYLAS"},
+  {"id": 1, "decision": "ATLA"}
 ]"""
+
+
+def build_user_prompt(candidates: List[Dict]) -> str:
+    lines = ["Aşağıdaki tweet'leri değerlendir:"]
+    lines.append("")
+    for idx, c in enumerate(candidates):
+        text = c.get('title', '') or c.get('text', '') or ''
+        lines.append(f"[{idx}] {text}")
+        lines.append("")
+    lines.append("JSON yanıt ver (sadece id ve decision):")
+    return "\n".join(lines)
 
 
 def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List[Dict]:
     if not news_items:
         return []
 
-    titles_context = "\n".join(f"- {t}" for t in recent_titles[:15]) if recent_titles else "(henüz hiçbiri)"
-    
-    news_formatted = ""
-    for i, item in enumerate(news_items):
-        news_formatted += (
-            f"\n--- HABER ID: {i} ---\n"
-            f"Başlık: {item['title']}\n"
-            f"Detay: {item.get('description', '')}\n"
-            f"Kaynak: {item['source']}\n"
-        )
-
-    prompt = PROMPT_TEMPLATE.format(
-        recent_titles=titles_context,
-        news_formatted=news_formatted
-    )
+    full_prompt = SYSTEM_PROMPT + "\n\n" + build_user_prompt(news_items)
 
     try:
-        response_text = _call_llm(prompt)
+        response_text = _call_llm(full_prompt)
     except AIQuotaExceeded:
         raise
     except AIPromptTooLarge:
@@ -491,16 +406,13 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
         if idx is None or idx >= len(news_items):
             continue
         if decision in ("PAYLAS", "PAYLAŞ"):
-            tweet_text = (res.get("tweet") or "").strip()
-            if not tweet_text:
-                continue
             item = news_items[idx]
             processed.append({
+                "idx": idx,
                 "title": item['title'],
-                "tweet": tweet_text,
                 "link": item['link'],
                 "published_date": item.get('published_date', time.strftime('%Y-%m-%d %H:%M:%S'))
             })
-    
+
     logger.info(f"AI batch: {len(news_items)} işlendi, {len(processed)} paylaşılacak.")
     return processed

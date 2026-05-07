@@ -9,6 +9,7 @@ Faz 1'e ek olarak:
 """
 
 import os
+import re
 import time
 import json
 import logging
@@ -230,8 +231,9 @@ def publisher_job():
             database.update_tweet_status(tweet_id, 'Paylasildi')
             logger.warning(f"[Publisher] ✓ ID {tweet_id} paylaşıldı ama Twitter ID alınamadı.")
     else:
-        database.increment_attempt(tweet_id)
-        logger.warning(f"[Publisher] ✗ ID {tweet_id} fail. Attempt sayacı artırıldı.")
+        # Faz 8: Tek deneme — fail ise direkt bırak, retry yok
+        database.update_tweet_status(tweet_id, 'Failed')
+        logger.warning(f"[Publisher] ✗ ID {tweet_id} fail. Tek deneme, abandon edildi.")
 
 # ============================================================
 # Collector
@@ -350,6 +352,7 @@ def twitter_collector_job():
             "_share_decision": share_decision,
             "_tweet_url": tweet_url,
             "_source_username": username,
+            "_tweet": tweet,
         })
 
     logger.info(
@@ -379,33 +382,30 @@ def twitter_collector_job():
             logger.error(f"[Collector] Batch hatası: {e}")
             continue
 
-        title_to_item = {item['title']: item for item in batch}
-
-        # AI ATLA dediklerini cache'e ekle (gelecek döngülerde tekrar AI'a gitmesin)
-        processed_titles = {res['title'] for res in results}
-        for item in batch:
-            if item['title'] not in processed_titles:
+        # Faz 8: ATLA cache — PAYLAS olmayan tüm batch itemlarını ekle
+        paylas_idxs = {res['idx'] for res in results}
+        for i, item in enumerate(batch):
+            if i not in paylas_idxs:
                 _atlanan_hashes.add(database.make_hash(item['title']))
-        # Cache çok büyüdüyse temizle (en eski hash'ler kaybolur, kabul edilebilir)
         if len(_atlanan_hashes) > _ATLANAN_CACHE_MAX_SIZE:
             logger.info(f"[Collector] ATLA cache {_ATLANAN_CACHE_MAX_SIZE} aşıldı, sıfırlanıyor")
             _atlanan_hashes.clear()
 
         for res in results:
-            original_item = title_to_item.get(res['title'])
-            if not original_item:
+            idx = res.get('idx')
+            if idx is None or idx >= len(batch):
                 continue
 
+            original_item = batch[idx]
             share_decision = original_item.get('_share_decision', 'text')
             tweet_url = original_item.get('_tweet_url', '')
             source_username = original_item.get('_source_username', '')
+            orig_tweet = original_item.get('_tweet') or {}
 
-            # AI'dan gelen tweet metni (orijinal kaynak metnin sıkıştırılmış hali)
-            base_text = res['tweet'].strip()
+            # Faz 8: Orijinal tweet metnini AYNEN al (AI metin üretmiyor)
+            base_text = (original_item.get('title') or '').strip()
 
-            # Faz 7 hot fix 10: AI batch işlerken t.co linklerini metne yapıştırıyor.
-            # Bot kendi /video/1 veya /photo/1 linkini zaten ekliyor — t.co'ları sil ki çift link olmasın.
-            import re
+            # Hot fix 10 mantığı korunuyor: t.co linklerini sil (çift link olmasın)
             base_text = re.sub(r'\s*https?://t\.co/\w+\s*', ' ', base_text).strip()
             base_text = re.sub(r'\s+', ' ', base_text).strip()
 
@@ -422,17 +422,14 @@ def twitter_collector_job():
                 r'Anadolu Ajansı|İHA|DHA|AA|Sky Sport|Tuttosport|Gazzetta|L\'Equipe|'
                 r'Goal|ESPN|BBC|Telegraph|Mirror|Sun|Marca|AS|Bild|Kicker'
             )
-            # @username ve bilinen medya: case-insensitive
             media_pattern = re.compile(
                 rf'\(\s*(?:@\w+|{KNOWN_SOURCES})\s*\)',
                 re.IGNORECASE
             )
-            # Ad Soyad: case-sensitive — küçük harfli "(orta saha)" gibi ifadeler eşleşmesin
             ad_soyad_pattern = re.compile(
                 r'\(\s*[A-ZÇĞİÖŞÜ][a-zçğıöşüA-ZÇĞİÖŞÜ\.]+\s+[A-ZÇĞİÖŞÜ][a-zçğıöşüA-ZÇĞİÖŞÜ\.]+\s*\)'
             )
             has_known_source_anywhere = bool(media_pattern.search(base_text)) or bool(ad_soyad_pattern.search(base_text))
-
             has_existing_source = has_source_at_end or has_known_source_anywhere
 
             # 2. Tweet "İsim:" veya "İsim Soyisim:" formatında başlıyor mu?
@@ -449,12 +446,11 @@ def twitter_collector_job():
                 base_text = f"{base_text} (@{source_username})"
 
             if share_decision == 'video_embed' and tweet_url:
-                # Faz 7 hot fix 11: media[0].expanded_url öncelikli (gerçek video kaynağı)
-                expanded = get_media_expanded_url(tweet)
+                # Hot fix 11 mantığı korunuyor: media[0].expanded_url öncelikli
+                expanded = get_media_expanded_url(orig_tweet)
                 if expanded and '/video/' in expanded:
                     video_url = expanded.split('?')[0]
                 else:
-                    # Fallback: üst tweet URL'sine /video/1 ekle
                     video_url = twitter_manager.make_video_embed_url(tweet_url)
                 full_text = f"{base_text} {video_url}"
                 ok = database.add_pending_tweet(
@@ -465,12 +461,11 @@ def twitter_collector_job():
                 if ok:
                     video_embed_count += 1
             elif share_decision == 'photo_embed' and tweet_url:
-                # Faz 7 hot fix 11: media[0].expanded_url öncelikli (gerçek foto kaynağı)
-                expanded = get_media_expanded_url(tweet)
+                # Hot fix 11 mantığı korunuyor: media[0].expanded_url öncelikli
+                expanded = get_media_expanded_url(orig_tweet)
                 if expanded and '/photo/' in expanded:
                     photo_url = expanded.split('?')[0]
                 else:
-                    # Fallback: üst tweet URL'sine /photo/1 ekle
                     photo_url = twitter_manager.make_photo_embed_url(tweet_url)
                 full_text = f"{base_text} {photo_url}"
                 ok = database.add_pending_tweet(
@@ -481,7 +476,6 @@ def twitter_collector_job():
                 if ok:
                     photo_embed_count += 1
             else:
-                # Text: medya yok, görsel ama t.co var, veya qoq
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
                     tweet_content=base_text,
@@ -564,7 +558,7 @@ def engagement_tracker_job():
 
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("X Sports News Bot başlatılıyor (Faz 5 — Video Embed + Akıllı Filtre)...")
+    logger.info("X Sports News Bot başlatılıyor (Faz 8 — Orijinal Metin + Yavaşlatma + Tek Deneme)...")
     logger.info(f"AI Provider: {ai_manager.AI_PROVIDER}")
     logger.info(f"List ID: {TWITTER_LIST_ID}")
     logger.info(f"Filtre: Akıllı (engagement rate + RT ratio) | Max Age: {MAX_TWEET_AGE_HOURS}h | AI Batch: {AI_BATCH_SIZE}")
