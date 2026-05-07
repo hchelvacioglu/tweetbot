@@ -423,15 +423,16 @@ def twitter_collector_job():
                 and not starts_with_named_quote):
                 base_text = f"{base_text} (@{source_username})"
 
-            # 280 karakter kontrolü — Twitter Blue olmadan note tweet atılamıyor
-            TWITTER_MAX_LENGTH = 280
+            # Karakter limitleri — embed tweet'lerde Twitter kart için yer bırak
+            TWITTER_MAX_LENGTH = 280       # text-only için
+            TWITTER_EMBED_LIMIT = 220      # video/foto embed için (Twitter kart render için 60 kar. boşluk)
 
             if share_decision == 'video_embed' and tweet_url:
                 # Faz 5: AI metninin sonuna /video/1 URL ekle
                 video_url = twitter_manager.make_video_embed_url(tweet_url)
                 full_text = f"{base_text} {video_url}"
-                if len(full_text) > TWITTER_MAX_LENGTH:
-                    logger.warning(f"[Collector] ⚠️ Tweet 280+ karakter ({len(full_text)}), atlanıyor: {res['title'][:60]}")
+                if len(full_text) > TWITTER_EMBED_LIMIT:
+                    logger.warning(f"[Collector] ⚠️ Video tweet 220+ karakter ({len(full_text)}), atlanıyor: {res['title'][:60]}")
                     too_long_count += 1
                     continue
                 ok = database.add_pending_tweet(
@@ -445,8 +446,8 @@ def twitter_collector_job():
                 # Faz 7: AI metninin sonuna /photo/1 URL ekle
                 photo_url = twitter_manager.make_photo_embed_url(tweet_url)
                 full_text = f"{base_text} {photo_url}"
-                if len(full_text) > TWITTER_MAX_LENGTH:
-                    logger.warning(f"[Collector] ⚠️ Tweet 280+ karakter ({len(full_text)}), atlanıyor: {res['title'][:60]}")
+                if len(full_text) > TWITTER_EMBED_LIMIT:
+                    logger.warning(f"[Collector] ⚠️ Foto tweet 220+ karakter ({len(full_text)}), atlanıyor: {res['title'][:60]}")
                     too_long_count += 1
                     continue
                 ok = database.add_pending_tweet(
@@ -459,7 +460,7 @@ def twitter_collector_job():
             else:
                 # Text: medya yok, görsel ama t.co var, veya qoq
                 if len(base_text) > TWITTER_MAX_LENGTH:
-                    logger.warning(f"[Collector] ⚠️ Tweet 280+ karakter ({len(base_text)}), atlanıyor: {res['title'][:60]}")
+                    logger.warning(f"[Collector] ⚠️ Text tweet 280+ karakter ({len(base_text)}), atlanıyor: {res['title'][:60]}")
                     too_long_count += 1
                     continue
                 ok = database.add_pending_tweet(
