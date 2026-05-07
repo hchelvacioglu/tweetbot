@@ -141,8 +141,7 @@ def get_hour_thresholds() -> dict:
     - 10-16: Gündüz (normal akış)
     - 16-22: Akşam (yoğun trafik, sıkı eşikler)
     """
-    utc_hour = datetime.datetime.utcnow().hour
-    tr_hour = (utc_hour + 3) % 24
+    tr_hour = datetime.datetime.now().hour
 
     if 6 <= tr_hour < 10:
         return {'profil': 'sabah',  'tr_hour': tr_hour, 'min_likes': 10, 'rt_ratio': 0.005, 'reply_ratio': 0.05,  'interest': 0.10}

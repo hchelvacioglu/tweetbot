@@ -162,7 +162,7 @@ def get_oldest_pending_tweet() -> Optional[Dict]:
 def get_recent_news_titles(hours: int = 12) -> List[str]:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    time_threshold = datetime.datetime.utcnow() - datetime.timedelta(hours=hours)
+    time_threshold = datetime.datetime.now() - datetime.timedelta(hours=hours)
     cursor.execute('''
         SELECT title FROM Bekleyen_Tweetler
         WHERE created_at >= ?
@@ -200,7 +200,7 @@ def save_posted_tweet_id(tweet_id: int, posted_tweet_id: str):
     """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    now_iso = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    now_iso = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute('''
         UPDATE Bekleyen_Tweetler
         SET status = 'Paylasildi', posted_tweet_id = ?, posted_at = ?
@@ -248,7 +248,7 @@ def get_pending_engagement_checks() -> List[Dict]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now()
     
     # Son 48 saat içinde paylaşılmış tweetleri getir (24h snapshot için marj)
     cutoff = (now - datetime.timedelta(hours=48)).strftime('%Y-%m-%d %H:%M:%S')
@@ -301,7 +301,7 @@ def update_engagement(tweet_id: int, snapshot: str, likes: int, retweets: int, r
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    now_iso = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    now_iso = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     # Dynamic column name'ler — snapshot suffix ile
     cursor.execute(f'''
@@ -327,7 +327,7 @@ def cleanup_stale_pending_tweets(max_age_minutes: int = 30) -> int:
 
     Returns: işaretlenen tweet sayısı
     """
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=max_age_minutes)
+    cutoff = datetime.datetime.now() - datetime.timedelta(minutes=max_age_minutes)
     cutoff_iso = cutoff.strftime('%Y-%m-%d %H:%M:%S')
 
     conn = sqlite3.connect(DB_NAME)
