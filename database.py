@@ -322,8 +322,8 @@ def update_engagement(tweet_id: int, snapshot: str, likes: int, retweets: int, r
 
 def cleanup_stale_pending_tweets(max_age_minutes: int = 30) -> int:
     """
-    30 dk'dan eski 'Bekliyor' statusundaki tweet'leri 'Basarisiz' olarak işaretler.
-    Bayat haberlerin profile düşmesini engeller.
+    Belirli yaştan eski 'Bekliyor' statusundaki tweet'leri 'Basarisiz' olarak işaretler.
+    Yedek güvenlik: collector geç çalışırsa veya crash olursa devreye girer.
 
     Returns: işaretlenen tweet sayısı
     """
@@ -339,6 +339,27 @@ def cleanup_stale_pending_tweets(max_age_minutes: int = 30) -> int:
             WHERE status = 'Bekliyor'
             AND created_at < ?
         """, (cutoff_iso,))
+        affected = cursor.rowcount
+        conn.commit()
+        return affected
+    finally:
+        conn.close()
+
+def clear_all_pending_tweets() -> int:
+    """
+    Kuyruktaki TÜM 'Bekliyor' statusundaki tweet'leri 'Iptal' olarak işaretler.
+    Collector başlangıcında çağrılır → her cycle taze başlar.
+
+    Returns: temizlenen tweet sayısı
+    """
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE Bekleyen_Tweetler
+            SET status = 'Iptal'
+            WHERE status = 'Bekliyor'
+        """)
         affected = cursor.rowcount
         conn.commit()
         return affected

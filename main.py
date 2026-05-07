@@ -197,7 +197,8 @@ def should_collect(tweet: dict) -> tuple:
 
 def publisher_job():
     # Hot Fix 16: Bayat tweet'leri temizle (30 dk üstü)
-    stale_count = database.cleanup_stale_pending_tweets(max_age_minutes=30)
+    # Hot Fix 17: Yedek güvenlik — collector geç çalışırsa veya crash olursa devreye girer
+    stale_count = database.cleanup_stale_pending_tweets(max_age_minutes=60)
     if stale_count > 0:
         logger.info(f"[Publisher] 🗑️ {stale_count} bayat tweet temizlendi (30+ dk eski, Basarisiz işaretlendi)")
 
@@ -258,6 +259,11 @@ def twitter_collector_job():
         remaining = (_ai_quota_blocked_until - datetime.datetime.now()).total_seconds() / 60
         logger.info(f"[Collector] AI kotası kilitli, {remaining:.0f} dk sonra tekrar denenecek.")
         return
+
+    # Hot Fix 17: Yeni cycle, kuyruğu sıfırla — önceki cycle'dan kalanlar bayatlamış olabilir
+    cleared = database.clear_all_pending_tweets()
+    if cleared > 0:
+        logger.info(f"[Collector] 🧹 {cleared} eski bekleyen tweet temizlendi (Iptal işaretlendi)")
 
     th = get_hour_thresholds()
     logger.info(
