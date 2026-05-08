@@ -49,6 +49,19 @@ _ai_quota_blocked_until = None
 # AI'ın ATLA dediği tweet hash'leri — aynı tweet'i tekrar AI'a yollamayalım
 _atlanan_hashes = set()
 _ATLANAN_CACHE_MAX_SIZE = 5000  # cache max boyut, dolduğunda sıfırla
+_atla_cache_last_cleared = datetime.datetime.now()  # Hot Fix 23
+
+
+def _maybe_clear_atla_cache(hours: int = 2):
+    """ATLA cache son N saatte temizlenmediyse temizle. (Hot Fix 23)"""
+    global _atla_cache_last_cleared
+    elapsed = (datetime.datetime.now() - _atla_cache_last_cleared).total_seconds() / 3600
+    if elapsed >= hours:
+        old_size = len(_atlanan_hashes)
+        _atlanan_hashes.clear()
+        _atla_cache_last_cleared = datetime.datetime.now()
+        logger.info(f"[Collector] 🧠 ATLA cache temizlendi ({old_size} hash silindi, {hours} saat doldu)")
+
 
 # ============================================================
 # Yardımcılar
@@ -258,6 +271,9 @@ def twitter_collector_job():
         remaining = (_ai_quota_blocked_until - datetime.datetime.now()).total_seconds() / 60
         logger.info(f"[Collector] AI kotası kilitli, {remaining:.0f} dk sonra tekrar denenecek.")
         return
+
+    # Hot Fix 23: ATLA cache 2 saatte bir temizle
+    _maybe_clear_atla_cache(hours=2)
 
     # Hot Fix 17: Yeni cycle, kuyruğu sıfırla — önceki cycle'dan kalanlar bayatlamış olabilir
     cleared = database.clear_all_pending_tweets()
