@@ -368,3 +368,48 @@ def clear_all_pending_tweets() -> int:
         return affected
     finally:
         conn.close()
+
+
+def _normalize_text_for_dedup(text: str) -> set:
+    if not text:
+        return set()
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r't\.co/\S+', '', text)
+    text = text.lower()
+    text = re.sub(r'[^\w\sçğıöşü]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return {w for w in text.split() if len(w) >= 3}
+
+
+def is_duplicate_recent_tweet(new_text: str, hours: int = 2, threshold: float = 0.6) -> bool:
+    """
+    Son N saatte atılmış/kuyruktaki tweet'lerle Jaccard similarity hesaplar.
+    threshold üstü benzerlik → mükerrer (True).
+    """
+    new_words = _normalize_text_for_dedup(new_text)
+    if len(new_words) < 3:
+        return False
+
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tweet_content
+            FROM Bekleyen_Tweetler
+            WHERE status IN ('Paylasildi', 'Bekliyor')
+            AND created_at >= datetime('now', ?)
+        """, (f'-{hours} hours',))
+
+        for (old_text,) in cursor.fetchall():
+            old_words = _normalize_text_for_dedup(old_text)
+            if len(old_words) < 3:
+                continue
+            union = len(new_words | old_words)
+            if union == 0:
+                continue
+            if len(new_words & old_words) / union >= threshold:
+                return True
+
+        return False
+    finally:
+        conn.close()

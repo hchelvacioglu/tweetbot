@@ -384,6 +384,7 @@ def twitter_collector_job():
     video_embed_count = 0
     photo_embed_count = 0
     text_count = 0
+    duplicate_count = 0
 
     for i in range(0, len(pending_items), AI_BATCH_SIZE):
         batch = pending_items[i:i + AI_BATCH_SIZE]
@@ -460,6 +461,12 @@ def twitter_collector_job():
                 and not starts_with_named_quote):
                 base_text = f"{base_text} (@{source_username})"
 
+            # Hot Fix 21: Jaccard similarity dedup (mükerrer haber engelleme)
+            if database.is_duplicate_recent_tweet(base_text, hours=2, threshold=0.6):
+                logger.info(f"[Collector] 🔁 Mükerrer haber atlandı (son 2 saatte benzer atıldı): {base_text[:60]}...")
+                duplicate_count += 1
+                continue
+
             if share_decision == 'video_embed' and tweet_url:
                 # Hot fix 11 mantığı korunuyor: media[0].expanded_url öncelikli
                 expanded = get_media_expanded_url(orig_tweet)
@@ -511,7 +518,7 @@ def twitter_collector_job():
 
     logger.info(
         f"[Collector] Bitti. {saved_count} yeni tweet "
-        f"(video: {video_embed_count}, foto: {photo_embed_count}, text: {text_count})."
+        f"(video: {video_embed_count}, foto: {photo_embed_count}, text: {text_count}, dup_atlandı: {duplicate_count})."
     )
 
 # ============================================================
