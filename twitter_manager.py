@@ -182,10 +182,9 @@ def post_tweet(text: str, reply_to_id: str = None) -> Union[bool, str]:
     Faz 2: başarıda Twitter tweet ID'sini döner (string).
     Başarısızlıkta False döner. (Geri uyumlu — bool kontrolünde False çalışır.)
     """
-    # Hot Fix 14: 280+ karakterli tweet'leri atla (GetXAPI 500 dönüyor)
-    if len(text) >= TWEET_HARD_LIMIT:
-        logger.warning(f"⏭️ Tweet uzun (uzunluk={len(text)}, limit={TWEET_HARD_LIMIT}) — atlandı")
-        return "skip_too_long"
+    # Hot Fix 14 (280+ skip) Hot Fix 24 ile kaldırıldı.
+    # Sebep: Yeni X auth token Premium claim taşıyor, 280+ note tweet artık çalışıyor.
+    # Manuel test (8 Mayıs, 331 karakter): GetXAPI Status 200 döndü.
 
     try:
         url = f"{GETXAPI_BASE_URL}/twitter/tweet/create"
