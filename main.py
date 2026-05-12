@@ -622,7 +622,7 @@ def hourly_summary_job():
             WHERE status = 'Paylasildi'
               AND posted_at >= ?
             ORDER BY posted_at DESC
-            LIMIT 7
+            LIMIT 6
             """,
             (one_hour_ago.strftime('%Y-%m-%d %H:%M:%S'),),
         )
@@ -639,9 +639,15 @@ def hourly_summary_job():
     news_items = []
     for row in rows:
         try:
-            headline = ai_manager.summarize_for_card(row["tweet_content"], max_chars=60)
+            raw = row["tweet_content"] or ""
+            headline = ai_manager.summarize_for_card(raw, max_chars=80)
+            # Açıklama: URL'siz ham metin, max 120 karakter
+            desc = re.sub(r'https?://\S+', '', raw).strip()
+            desc = re.sub(r'\s+', ' ', desc)
+            if len(desc) > 120:
+                desc = desc[:118].rstrip() + "..."
             if headline:
-                news_items.append(headline)
+                news_items.append({"headline": headline, "desc": desc})
         except Exception as e:
             logger.warning(f"[Summary] Başlık çıkarma hata (id={row['id']}): {e}")
 
