@@ -292,3 +292,40 @@ def post_quote_tweet(text: str, quote_url: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"post_quote_tweet network error: {e}")
         return False
+
+
+def post_tweet_with_media(text: str, media_base64: str, media_type: str = "image/png") -> dict:
+    """
+    Tweet at + base64-encoded görsel ekle. GetXAPI media field kullanır.
+
+    Args:
+        text: Tweet metni
+        media_base64: Ham base64 string (data: prefix YOK)
+        media_type: "image/png" veya "image/jpeg"
+
+    Returns:
+        GetXAPI response dict ya da None
+    """
+    url = f"{GETXAPI_BASE_URL}/twitter/tweet/create"
+    payload = {
+        "auth_token": os.getenv("X_AUTH_TOKEN"),
+        "text": text,
+        "media": [{"data": media_base64, "type": media_type}],
+    }
+
+    logger.info(f"Posting tweet with media ({len(media_base64)} chars base64): {text[:80]}")
+
+    try:
+        response = requests.post(url, headers=_get_headers(), json=payload, timeout=60)
+
+        if response.status_code == 200:
+            data = response.json()
+            tweet_id = data.get("data", {}).get("id")
+            logger.info(f"✓ Tweet with media posted! ID: {tweet_id}")
+            return data
+        else:
+            logger.error(f"post_tweet_with_media failed | status={response.status_code} | body={response.text[:200]}")
+            return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"post_tweet_with_media network error: {e}")
+        return None

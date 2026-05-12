@@ -416,3 +416,37 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
 
     logger.info(f"AI batch: {len(news_items)} işlendi, {len(processed)} paylaşılacak.")
     return processed
+
+
+def summarize_for_card(tweet_text: str, max_chars: int = 60) -> str:
+    """
+    Uzun tweet metnini özet kart başlığına indirir.
+    HİBRİT: 80 char altı ham döner, üstü AI özetler.
+    """
+    if not tweet_text:
+        return ""
+
+    cleaned = tweet_text.strip()
+    cleaned = re.sub(r'https?://\S+', '', cleaned).strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+
+    if len(cleaned) <= 80:
+        return cleaned
+
+    prompt = (
+        f"Aşağıdaki futbol haberini {max_chars} karakterden kısa bir başlığa indir, "
+        f"Türkçe döndür. Başlığın sonunda nokta olmasın. SADECE başlık metni.\n\n"
+        f"Haber:\n{cleaned}\n\nBaşlık:"
+    )
+
+    try:
+        response = _call_llm(prompt)
+        if not response:
+            return cleaned[:75].rstrip() + "..."
+        result = response.strip().strip('"').strip("'").split('\n')[0].strip()
+        if len(result) > max_chars + 10:
+            result = result[:max_chars].rstrip() + "..."
+        return result
+    except Exception as e:
+        logger.warning(f"summarize_for_card hata: {e}, fallback")
+        return cleaned[:75].rstrip() + "..."

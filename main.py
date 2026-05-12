@@ -30,9 +30,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import sqlite3
 import database
 import ai_manager
 import twitter_manager
+import summary_card
+from summary_card import generate_summary_card
 
 # ============================================================
 # Config
@@ -591,6 +594,89 @@ def engagement_tracker_job():
     logger.info(f"[Engagement] Bitti. ✓ {success_count} | ✗ {fail_count}")
 
 # ============================================================
+# Saatlik Özet Kart — Faz 10 / Hot Fix 25
+# ============================================================
+
+SUMMARY_TEST_MODE = os.getenv("SUMMARY_TEST_MODE", "true").lower() == "true"
+SUMMARY_HOURS_ACTIVE = set(range(8, 24)) | {0, 1, 2}  # 08:00-23:00 + 00:00, 01:00, 02:00
+
+
+def hourly_summary_job():
+    """Her tam saatte tetiklenir. Son 1 saatin tweet özetini kart olarak hazırlar."""
+    now = datetime.datetime.now()
+
+    if now.hour not in SUMMARY_HOURS_ACTIVE:
+        logger.info(f"[Summary] Saat {now.hour}:00 — aktif saat değil, atlandı")
+        return
+
+    one_hour_ago = now - datetime.timedelta(hours=1)
+
+    conn = sqlite3.connect(database.DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, tweet_content, posted_at
+            FROM Bekleyen_Tweetler
+            WHERE status = 'Paylasildi'
+              AND posted_at >= ?
+            ORDER BY posted_at DESC
+            LIMIT 7
+            """,
+            (one_hour_ago.strftime('%Y-%m-%d %H:%M:%S'),),
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    if len(rows) < 3:
+        logger.info(f"[Summary] Son 1 saatte {len(rows)} tweet — yetersiz (min 3), kart atılmadı")
+        return
+
+    logger.info(f"[Summary] {len(rows)} tweet için kart hazırlanıyor...")
+
+    news_items = []
+    for row in rows:
+        try:
+            headline = ai_manager.summarize_for_card(row["tweet_content"], max_chars=60)
+            if headline:
+                news_items.append(headline)
+        except Exception as e:
+            logger.warning(f"[Summary] Başlık çıkarma hata (id={row['id']}): {e}")
+
+    if len(news_items) < 3:
+        logger.warning(f"[Summary] Başlık çıkarma sonrası {len(news_items)} kaldı, kart atılmadı")
+        return
+
+    time_range = f"{one_hour_ago.strftime('%H:00')} - {now.strftime('%H:00')}"
+    success, png_path, b64_data = generate_summary_card(news_items, time_range)
+
+    if not success:
+        logger.error("[Summary] Kart üretimi başarısız")
+        return
+
+    logger.info(f"[Summary] ✓ Kart hazır: {png_path}")
+
+    if SUMMARY_TEST_MODE:
+        logger.info(f"[Summary] 🧪 TEST MODE — Twitter'a atılmadı. PNG: {png_path}")
+        return
+
+    if not b64_data:
+        logger.error("[Summary] Base64 data yok, atılamadı")
+        return
+
+    tweet_text = f"🏆 SAATLİK ÖZET — {now.strftime('%H:00')}"
+    try:
+        result = twitter_manager.post_tweet_with_media(tweet_text, b64_data, media_type="image/png")
+        if result:
+            logger.info(f"[Summary] ✓ Özet kart atıldı: {result.get('data', {}).get('id')}")
+        else:
+            logger.error("[Summary] Atış başarısız")
+    except Exception as e:
+        logger.error(f"[Summary] Atış hata: {e}")
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -608,6 +694,8 @@ if __name__ == "__main__":
     schedule.every(COLLECTOR_INTERVAL_MIN).minutes.do(twitter_collector_job)
     schedule.every(PUBLISHER_INTERVAL_MIN).minutes.do(publisher_job)
     schedule.every(ENGAGEMENT_INTERVAL_MIN).minutes.do(engagement_tracker_job)
+    # Faz 10 / Hot Fix 25: Saatlik özet kart (her tam saatin :00'ında)
+    schedule.every().hour.at(":00").do(hourly_summary_job)
 
     logger.info("İlk collector çağrısı...")
     twitter_collector_job()
