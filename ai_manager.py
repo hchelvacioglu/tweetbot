@@ -418,35 +418,63 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
     return processed
 
 
-def summarize_for_card(tweet_text: str, max_chars: int = 60) -> str:
+def summarize_for_card(tweet_text: str, max_chars: int = 80) -> str:
     """
-    Uzun tweet metnini özet kart başlığına indirir.
-    HİBRİT: 80 char altı ham döner, üstü AI özetler.
+    Tweet metnini saatlik özet kartı için başlığa dönüştürür.
+    Haber niteliğinde değilse (görüş, tebrik, reaksiyon) None döner.
+    Her zaman nokta ile biter.
     """
     if not tweet_text:
-        return ""
+        return None
 
     cleaned = tweet_text.strip()
     cleaned = re.sub(r'https?://\S+', '', cleaned).strip()
     cleaned = re.sub(r'\s+', ' ', cleaned)
 
-    if len(cleaned) <= 80:
-        return cleaned
+    if not cleaned:
+        return None
 
     prompt = (
-        f"Aşağıdaki futbol haberini {max_chars} karakterden kısa bir başlığa indir, "
-        f"Türkçe döndür. Başlığın sonunda nokta olmasın. SADECE başlık metni.\n\n"
-        f"Haber:\n{cleaned}\n\nBaşlık:"
+        f"Aşağıdaki tweet bir futbol haberi mi yoksa kişisel görüş/tebrik/taziye/reaksiyon mu?\n\n"
+        f"Eğer haber DEĞİLSE (örn. 'geçmiş olsun', 'tebrikler', 'bence', kişisel yorum): "
+        f"SADECE 'HABER_DEGIL' yaz.\n\n"
+        f"Eğer habersa: Türkçe, {max_chars} karakterden kısa, nokta ile biten bir başlık yaz. "
+        f"Açıklama yok, sadece başlık.\n\n"
+        f"Tweet:\n{cleaned}\n\nYanıt:"
     )
 
     try:
         response = _call_llm(prompt)
         if not response:
-            return cleaned[:75].rstrip() + "..."
+            return _fallback_headline(cleaned, max_chars)
         result = response.strip().strip('"').strip("'").split('\n')[0].strip()
+        if result.upper() == "HABER_DEGIL":
+            logger.info(f"summarize_for_card: haber değil, atlandı — {cleaned[:60]}")
+            return None
+        # Nokta garantisi
+        if result and result[-1] not in '.!?':
+            result += '.'
         if len(result) > max_chars + 10:
-            result = result[:max_chars].rstrip() + "..."
+            result = result[:max_chars].rstrip().rstrip('.') + '...'
         return result
     except Exception as e:
         logger.warning(f"summarize_for_card hata: {e}, fallback")
-        return cleaned[:75].rstrip() + "..."
+        return _fallback_headline(cleaned, max_chars)
+
+
+def _fallback_headline(text: str, max_chars: int) -> str:
+    """AI başarısız olduğunda kelime sınırında kes ve nokta ekle."""
+    if len(text) <= max_chars:
+        result = text.rstrip()
+        if result and result[-1] not in '.!?':
+            result += '.'
+        return result
+    cut = text[:max_chars]
+    last_space = cut.rfind(' ')
+    if last_space > max_chars // 2:
+        result = cut[:last_space].rstrip()
+    else:
+        result = cut.rstrip()
+    if result and result[-1] not in '.!?':
+        result += '...'
+    return result

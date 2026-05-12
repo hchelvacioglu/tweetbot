@@ -73,6 +73,25 @@ def _maybe_clear_atla_cache(hours: int = 2):
 def is_night_time() -> bool:
     return 3 <= datetime.datetime.now().hour < 7
 
+
+def _first_sentence(text: str, max_chars: int = 140) -> str:
+    """Metinden ilk tam cümleyi çıkar. Cümle yoksa kelime sınırında kes."""
+    for end in ['. ', '! ', '? ']:
+        idx = text.find(end)
+        if 0 < idx < max_chars:
+            return text[:idx + 1].strip()
+    # Nokta cümle sonundaysa (metin noktayla bitiyorsa)
+    for end in ['.', '!', '?']:
+        if text.endswith(end) and len(text) <= max_chars:
+            return text
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last_space = cut.rfind(' ')
+    if last_space > max_chars // 2:
+        return cut[:last_space].rstrip() + "..."
+    return cut.rstrip() + "..."
+
 def parse_tweet_date(date_str: str):
     if not date_str:
         return None
@@ -641,13 +660,13 @@ def hourly_summary_job():
         try:
             raw = row["tweet_content"] or ""
             headline = ai_manager.summarize_for_card(raw, max_chars=80)
-            # Açıklama: URL'siz ham metin, max 120 karakter
-            desc = re.sub(r'https?://\S+', '', raw).strip()
-            desc = re.sub(r'\s+', ' ', desc)
-            if len(desc) > 120:
-                desc = desc[:118].rstrip() + "..."
-            if headline:
-                news_items.append({"headline": headline, "desc": desc})
+            if not headline:  # None → haber değil veya boş
+                continue
+            desc_raw = re.sub(r'https?://\S+', '', raw).strip()
+            desc_raw = re.sub(r'[\U00010000-\U0010ffff]', '', desc_raw)
+            desc_raw = re.sub(r'\s+', ' ', desc_raw).strip()
+            desc = _first_sentence(desc_raw, max_chars=140)
+            news_items.append({"headline": headline, "desc": desc})
         except Exception as e:
             logger.warning(f"[Summary] Başlık çıkarma hata (id={row['id']}): {e}")
 
