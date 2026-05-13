@@ -254,7 +254,11 @@ async def _render_to_png(html: str, output_path: Path) -> bool:
 
         async with async_playwright() as p:
             browser = await p.chromium.launch()
-            page = await browser.new_page(viewport={"width": 1600, "height": 900})
+            # device_scale_factor=2 → 3200x1800 render, Retina netliğinde
+            page = await browser.new_page(
+                viewport={"width": 1600, "height": 900},
+                device_scale_factor=2,
+            )
             await page.set_content(html, wait_until="networkidle")
             await page.wait_for_timeout(600)
             await page.screenshot(path=str(output_path), full_page=False, omit_background=False)
