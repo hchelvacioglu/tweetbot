@@ -316,7 +316,7 @@ def publisher_job():
 
     # result: ya str (tweet ID) ya True ya False ya "skip_too_long"
     if result == "skip_too_long":
-        database.update_tweet_status(tweet_id, 'Failed')
+        database.update_tweet_status(tweet_id, 'Basarisiz')
         logger.info(f"[Publisher] ⏭️ ID {tweet_id} 280+ karakter, GetXAPI çağrısı yapılmadı (para tasarrufu).")
     elif result:
         if isinstance(result, str) and result:
@@ -328,7 +328,7 @@ def publisher_job():
             logger.warning(f"[Publisher] ✓ ID {tweet_id} paylaşıldı ama Twitter ID alınamadı.")
     else:
         # Faz 8: Tek deneme — fail ise direkt bırak, retry yok
-        database.update_tweet_status(tweet_id, 'Failed')
+        database.update_tweet_status(tweet_id, 'Basarisiz')
         logger.warning(f"[Publisher] ✗ ID {tweet_id} fail. Tek deneme, abandon edildi.")
 
 # ============================================================
