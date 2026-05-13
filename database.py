@@ -108,6 +108,45 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # Hot Fix 30: TumToplananTweetler veri ambar
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS TumToplananTweetler (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tweet_id TEXT UNIQUE,
+            username TEXT,
+            user_followers INTEGER,
+            text TEXT,
+            tweet_url TEXT,
+            tweet_created_at TEXT,
+            collected_at TEXT,
+            tweet_hour INTEGER,
+            tweet_weekday INTEGER,
+            like_count INTEGER,
+            rt_count INTEGER,
+            reply_count INTEGER,
+            view_count INTEGER,
+            engagement_rate REAL,
+            interest_score REAL,
+            has_media INTEGER,
+            media_type TEXT,
+            is_quote INTEGER,
+            has_url_in_text INTEGER,
+            ai_decision TEXT,
+            ai_provider TEXT,
+            passed_filter INTEGER DEFAULT 0,
+            shared_to_flas INTEGER DEFAULT 0,
+            our_tweet_id TEXT,
+            our_tweet_status TEXT,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tt_tweet_id ON TumToplananTweetler(tweet_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tt_username ON TumToplananTweetler(username)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tt_hour ON TumToplananTweetler(tweet_hour)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tt_ai_decision ON TumToplananTweetler(ai_decision)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tt_collected_at ON TumToplananTweetler(collected_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tt_shared ON TumToplananTweetler(shared_to_flas)")
+
     conn.commit()
     conn.close()
 
@@ -410,6 +449,132 @@ def is_duplicate_recent_tweet(new_text: str, hours: int = 2, threshold: float = 
             if len(new_words & old_words) / union >= threshold:
                 return True
 
+        return False
+    finally:
+        conn.close()
+
+
+# ============================================================
+# Hot Fix 30: TumToplananTweetler Veri Ambar
+# ============================================================
+
+def save_collected_tweet(tweet_data, passed_filter=False, ai_decision=None, ai_provider=None):
+    """
+    Hot Fix 30: Collector'a giren her tweet'i kaydet (PAYLAS/ATLA fark etmez).
+    """
+    from datetime import datetime as dt
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    try:
+        now = dt.now()
+        tweet_created = tweet_data.get('created_at', '')
+
+        tweet_hour = None
+        tweet_weekday = None
+        try:
+            if tweet_created:
+                if 'T' in tweet_created or 'Z' in tweet_created:
+                    tc = dt.fromisoformat(tweet_created.replace('Z', '+00:00'))
+                else:
+                    tc = dt.strptime(tweet_created, '%Y-%m-%d %H:%M:%S')
+                tweet_hour = tc.hour
+                tweet_weekday = tc.weekday()
+        except Exception:
+            pass
+
+        likes = tweet_data.get('like_count', 0) or 0
+        rts = tweet_data.get('rt_count', 0) or 0
+        replies = tweet_data.get('reply_count', 0) or 0
+        followers = tweet_data.get('user_followers', 0) or 0
+        eng_rate = (likes + rts + replies) / followers if followers > 0 else 0.0
+
+        tweet_id = str(tweet_data.get('id') or tweet_data.get('tweet_id') or '')
+        if not tweet_id:
+            return False
+
+        cursor.execute("""
+            INSERT OR IGNORE INTO TumToplananTweetler (
+                tweet_id, username, user_followers, text, tweet_url,
+                tweet_created_at, collected_at, tweet_hour, tweet_weekday,
+                like_count, rt_count, reply_count, view_count,
+                engagement_rate, interest_score,
+                has_media, media_type, is_quote, has_url_in_text,
+                ai_decision, ai_provider, passed_filter
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tweet_id,
+            tweet_data.get('username'),
+            followers,
+            tweet_data.get('text'),
+            tweet_data.get('url') or tweet_data.get('tweet_url'),
+            tweet_created,
+            now.strftime('%Y-%m-%d %H:%M:%S'),
+            tweet_hour,
+            tweet_weekday,
+            likes, rts, replies,
+            tweet_data.get('view_count', 0) or 0,
+            eng_rate,
+            tweet_data.get('interest_score', 0) or 0,
+            1 if tweet_data.get('has_media') else 0,
+            tweet_data.get('media_type', 'none'),
+            1 if tweet_data.get('is_quote') else 0,
+            1 if tweet_data.get('has_url_in_text') else 0,
+            ai_decision,
+            ai_provider,
+            1 if passed_filter else 0
+        ))
+
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[save_collected_tweet] Hata: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def update_collected_ai_decision(tweet_id, ai_decision, ai_provider):
+    """
+    Hot Fix 30: AI yanıtı geldikten sonra kaydı güncelle.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE TumToplananTweetler
+            SET ai_decision = ?, ai_provider = ?
+            WHERE tweet_id = ?
+        """, (ai_decision, ai_provider, str(tweet_id)))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[update_collected_ai_decision] Hata: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def update_collected_tweet_outcome(tweet_id, shared, our_tweet_id=None, our_status=None):
+    """
+    Hot Fix 30: Tweet @FlasFutbool'da atılınca veya başarısız olunca güncelle.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE TumToplananTweetler
+            SET shared_to_flas = ?, our_tweet_id = ?, our_tweet_status = ?
+            WHERE tweet_id = ?
+        """, (1 if shared else 0, our_tweet_id, our_status, str(tweet_id)))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[update_collected_tweet_outcome] Hata: {e}")
         return False
     finally:
         conn.close()

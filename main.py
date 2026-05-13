@@ -13,6 +13,7 @@ import re
 import time
 import json
 import logging
+import logging.handlers
 import schedule
 import datetime
 from email.utils import parsedate_to_datetime
@@ -24,10 +25,18 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot.log"),
+        logging.handlers.RotatingFileHandler(
+            "bot.log", maxBytes=10*1024*1024, backupCount=5, encoding="utf-8"
+        ),
         logging.StreamHandler()
     ]
 )
+
+# Gürültü loglayan kütüphaneleri sustur
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("schedule").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 import sqlite3
@@ -41,7 +50,7 @@ from summary_card import generate_summary_card
 # Config
 # ============================================================
 TWITTER_LIST_ID = os.getenv("TWITTER_LIST_ID")
-MIN_LIKES = int(os.getenv("MIN_LIKES", 40))
+
 MAX_TWEET_AGE_HOURS = float(os.getenv("MAX_TWEET_AGE_HOURS", 3))
 COLLECTOR_INTERVAL_MIN = int(os.getenv("COLLECTOR_INTERVAL_MIN", 15))
 PUBLISHER_INTERVAL_MIN = int(os.getenv("PUBLISHER_INTERVAL_MIN", 3))
@@ -72,6 +81,33 @@ def _maybe_clear_atla_cache(hours: int = 2):
 
 def is_night_time() -> bool:
     return 3 <= datetime.datetime.now().hour < 7
+
+
+def is_active_hour(hour=None):
+    """
+    Hot Fix 29: Aktif saat penceresi 10:00-01:00 TR.
+
+    Aktif saatler: 10, 11, 12, ..., 23, 0 (15 saat)
+    Inaktif saatler: 1, 2, 3, ..., 9 (9 saat)
+
+    Args:
+        hour: Test için override. None ise datetime.datetime.now().hour kullanır.
+
+    Returns:
+        True: 10:00-01:00 arası (aktif)
+        False: 01:00-10:00 arası (inaktif)
+    """
+    if hour is None:
+        hour = datetime.datetime.now().hour
+    return hour >= 10 or hour == 0
+
+
+def extract_tweet_id_from_link(link):
+    """https://x.com/user/status/123456789 -> 123456789"""
+    if not link:
+        return None
+    match = re.search(r'/status/(\d+)', link)
+    return match.group(1) if match else None
 
 
 def _first_sentence(text: str, max_chars: int = 140) -> str:
@@ -232,12 +268,12 @@ def get_hour_thresholds() -> dict:
     tr_hour = datetime.datetime.now().hour
 
     if 6 <= tr_hour < 10:
-        return {'profil': 'sabah',  'tr_hour': tr_hour, 'min_likes': 10, 'rt_ratio': 0.005, 'reply_ratio': 0.05,  'interest': 0.10}
+        return {'profil': 'sabah',  'tr_hour': tr_hour, 'min_likes': 10, 'rt_ratio': 0.005, 'reply_ratio': 0.02,  'interest': 0.10}
     if 10 <= tr_hour < 16:
-        return {'profil': 'gündüz', 'tr_hour': tr_hour, 'min_likes': 15, 'rt_ratio': 0.01,  'reply_ratio': 0.10,  'interest': 0.15}
+        return {'profil': 'gündüz', 'tr_hour': tr_hour, 'min_likes': 15, 'rt_ratio': 0.01,  'reply_ratio': 0.03,  'interest': 0.15}
     if 16 <= tr_hour < 22:
-        return {'profil': 'akşam',  'tr_hour': tr_hour, 'min_likes': 25, 'rt_ratio': 0.015, 'reply_ratio': 0.12,  'interest': 0.20}
-    return     {'profil': 'gece',   'tr_hour': tr_hour, 'min_likes': 8,  'rt_ratio': 0.003, 'reply_ratio': 0.05,  'interest': 0.08}
+        return {'profil': 'akşam',  'tr_hour': tr_hour, 'min_likes': 25, 'rt_ratio': 0.015, 'reply_ratio': 0.04,  'interest': 0.20}
+    return     {'profil': 'gece',   'tr_hour': tr_hour, 'min_likes': 8,  'rt_ratio': 0.003, 'reply_ratio': 0.02,  'interest': 0.08}
 
 
 def get_rate_threshold(followers: int) -> float:
@@ -283,15 +319,18 @@ def should_collect(tweet: dict) -> tuple:
 # ============================================================
 
 def publisher_job():
+    # Hot Fix 29: Saat penceresi kontrolü (10:00-01:00 TR)
+    # Bu kontrol eski is_night_time()'ı (03-07) tamamen kapsar, o yüzden ayrıca çağrılmıyor.
+    if not is_active_hour():
+        current_hour = datetime.datetime.now().hour
+        logger.info(f"[Publisher] 🌙 Inaktif saat ({current_hour:02d}:00), atlanıyor (aktif: 10-01 TR)")
+        return
+
     # Hot Fix 16: Bayat tweet'leri temizle (30 dk üstü)
     # Hot Fix 17: Yedek güvenlik — collector geç çalışırsa veya crash olursa devreye girer
     stale_count = database.cleanup_stale_pending_tweets(max_age_minutes=60)
     if stale_count > 0:
-        logger.info(f"[Publisher] 🗑️ {stale_count} bayat tweet temizlendi (30+ dk eski, Basarisiz işaretlendi)")
-
-    if is_night_time():
-        logger.info("[Publisher] Gece modu (03-07), atlandı.")
-        return
+        logger.info(f"[Publisher] 🗑️ {stale_count} bayat tweet temizlendi (60+ dk eski, Basarisiz işaretlendi)")
 
     tweet = database.get_oldest_pending_tweet()
     if not tweet:
@@ -331,12 +370,37 @@ def publisher_job():
         database.update_tweet_status(tweet_id, 'Basarisiz')
         logger.warning(f"[Publisher] ✗ ID {tweet_id} fail. Tek deneme, abandon edildi.")
 
+    # Hot Fix 30: Veri ambarına sonucu işle
+    try:
+        link = tweet.get('link')
+        original_tweet_id = extract_tweet_id_from_link(link)
+        if original_tweet_id:
+            if result and result != "skip_too_long":
+                database.update_collected_tweet_outcome(
+                    original_tweet_id, shared=True,
+                    our_tweet_id=result if isinstance(result, str) else None,
+                    our_status='Paylasildi'
+                )
+            else:
+                database.update_collected_tweet_outcome(
+                    original_tweet_id, shared=False,
+                    our_status='Basarisiz' if result == "skip_too_long" or not result else 'Paylasildi'
+                )
+    except Exception as e:
+        logger.warning(f"[Publisher] update_collected_tweet_outcome hatası: {e}")
+
 # ============================================================
 # Collector
 # ============================================================
 
 def twitter_collector_job():
     global _ai_quota_blocked_until, _atlanan_hashes
+
+    # Hot Fix 29: Saat penceresi kontrolü (10:00-01:00 TR)
+    if not is_active_hour():
+        current_hour = datetime.datetime.now().hour
+        logger.info(f"[Collector] 🌙 Inaktif saat ({current_hour:02d}:00), atlanıyor (aktif: 10-01 TR)")
+        return
 
     if not TWITTER_LIST_ID:
         logger.warning("[Collector] TWITTER_LIST_ID yok, atlandı.")
@@ -363,7 +427,7 @@ def twitter_collector_job():
     )
     recent_titles = database.get_recent_news_titles(hours=12)
 
-    tweets = twitter_manager.get_list_tweets(TWITTER_LIST_ID, count=60)
+    tweets = twitter_manager.get_list_tweets(TWITTER_LIST_ID, count=100)
     if not tweets:
         logger.info("[Collector] Listeden tweet alınamadı, atlandı.")
         return
@@ -468,6 +532,31 @@ def twitter_collector_job():
         f"medya: {media_count}, q-of-q skip: {quote_skip_count})"
     )
 
+    # Hot Fix 30: Aday tweet'leri veri ambara kaydet
+    for item in pending_items:
+        try:
+            tw = item['_tweet']
+            tweet_data = {
+                'id': tw.get('id') or '',
+                'username': item.get('_source_username', ''),
+                'user_followers': (tw.get('author') or {}).get('followers', 0) or 0,
+                'text': item.get('title', ''),
+                'url': item.get('_tweet_url', ''),
+                'created_at': item.get('published_date', ''),
+                'like_count': tw.get('likeCount', 0) or 0,
+                'rt_count': tw.get('retweetCount', 0) or 0,
+                'reply_count': tw.get('replyCount', 0) or 0,
+                'view_count': tw.get('viewCount', 0) or 0,
+                'has_media': get_media_type(tw) != 'none',
+                'media_type': get_media_type(tw),
+                'is_quote': is_quote_of_quote(tw),
+                'has_url_in_text': has_tco_in_original(tw),
+                'interest_score': 0,
+            }
+            database.save_collected_tweet(tweet_data, passed_filter=True, ai_decision=None)
+        except Exception as e:
+            logger.warning(f"[Collector] save_collected_tweet hatası: {e}")
+
     if not pending_items:
         return
 
@@ -476,6 +565,7 @@ def twitter_collector_job():
     photo_embed_count = 0
     text_count = 0
     duplicate_count = 0
+    ai_atla_count = 0
 
     for i in range(0, len(pending_items), AI_BATCH_SIZE):
         batch = pending_items[i:i + AI_BATCH_SIZE]
@@ -491,6 +581,7 @@ def twitter_collector_job():
 
         # Faz 8: ATLA cache — PAYLAS olmayan tüm batch itemlarını ekle
         paylas_idxs = {res['idx'] for res in results}
+        ai_atla_count += len(batch) - len(paylas_idxs)
         for i, item in enumerate(batch):
             if i not in paylas_idxs:
                 _atlanan_hashes.add(database.make_hash(item['title']))
@@ -565,7 +656,7 @@ def twitter_collector_job():
                     video_url = expanded.split('?')[0]
                 else:
                     video_url = twitter_manager.make_video_embed_url(tweet_url)
-                full_text = f"{video_url} {base_text}"
+                full_text = f"{base_text}\n{video_url}"
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
                     tweet_content=full_text,
@@ -580,7 +671,7 @@ def twitter_collector_job():
                     photo_url = expanded.split('?')[0]
                 else:
                     photo_url = twitter_manager.make_photo_embed_url(tweet_url)
-                full_text = f"{photo_url} {base_text}"
+                full_text = f"{base_text}\n{photo_url}"
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
                     tweet_content=full_text,
@@ -604,12 +695,23 @@ def twitter_collector_job():
                 marker = markers.get(share_decision, '📝')
                 logger.info(f"[Collector] {marker} Kuyruğa: {res['title'][:60]}")
 
+        # Hot Fix 30: AI kararını veri ambarına işle (tüm batch için)
+        for idx_in_batch, item in enumerate(batch):
+            try:
+                tw = item['_tweet']
+                tweet_id = str(tw.get('id') or '')
+                if tweet_id:
+                    decision = 'PAYLAS' if idx_in_batch in paylas_idxs else 'ATLA'
+                    database.update_collected_ai_decision(tweet_id, decision, None)
+            except Exception as e:
+                logger.warning(f"[Collector] update_collected_ai_decision hatası: {e}")
+
         if i + AI_BATCH_SIZE < len(pending_items):
             time.sleep(5)
 
     logger.info(
         f"[Collector] Bitti. {saved_count} yeni tweet "
-        f"(video: {video_embed_count}, foto: {photo_embed_count}, text: {text_count}, dup_atlandı: {duplicate_count})."
+        f"(AI ATLA: {ai_atla_count}, video: {video_embed_count}, foto: {photo_embed_count}, text: {text_count}, dup_atlandı: {duplicate_count})."
     )
 
 # ============================================================
@@ -670,7 +772,7 @@ def engagement_tracker_job():
 # ============================================================
 
 SUMMARY_TEST_MODE = os.getenv("SUMMARY_TEST_MODE", "true").lower() == "true"
-SUMMARY_HOURS_ACTIVE = set(range(8, 24)) | {0, 1, 2}  # 08:00-23:00 + 00:00, 01:00, 02:00
+SUMMARY_HOURS_ACTIVE = set(range(11, 24)) | {0}  # Hot Fix 29: 11:00-23:00 + 00:00 (14 saat, 11-01 aktif)
 
 
 def hourly_summary_job():
@@ -744,25 +846,23 @@ def hourly_summary_job():
         logger.warning(f"[Summary] Hedef 7, bulunan {len(news_items)} — yine de atılıyor")
 
     time_range = f"{one_hour_ago.strftime('%H:00')} - {now.strftime('%H:00')}"
-    success, png_path, b64_data = generate_summary_card(news_items, time_range)
+    success, jpg_path, public_url = generate_summary_card(news_items, time_range)
 
     if not success:
         logger.error("[Summary] Kart üretimi başarısız")
         return
 
-    logger.info(f"[Summary] ✓ Kart hazır: {png_path}")
-
     if SUMMARY_TEST_MODE:
-        logger.info(f"[Summary] 🧪 TEST MODE — Twitter'a atılmadı. PNG: {png_path}")
+        logger.info(f"[Summary] 🧪 TEST MODE — Twitter'a atılmadı. JPG: {jpg_path}")
         return
 
-    if not b64_data:
-        logger.error("[Summary] Base64 data yok, atılamadı")
+    if not public_url:
+        logger.error("[Summary] GCS public URL yok, atılamadı")
         return
 
-    tweet_text = f"🏆 SAATLİK ÖZET — {now.strftime('%H:00')}"
+    tweet_text = f"🏆 {now.strftime('%H:00')} Saatlik Futbol Özeti"
     try:
-        result = twitter_manager.post_tweet_with_media(tweet_text, b64_data, media_type="image/jpeg")
+        result = twitter_manager.post_tweet_with_media_url(tweet_text, public_url)
         if result:
             logger.info(f"[Summary] ✓ Özet kart atıldı: {result.get('data', {}).get('id')}")
         else:
@@ -777,6 +877,16 @@ def hourly_summary_job():
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("X Sports News Bot başlatılıyor (Faz 8 — Orijinal Metin + Yavaşlatma + Tek Deneme)...")
+    try:
+        import subprocess
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        logger.info(f"Git commit: {commit}")
+    except Exception:
+        pass
     logger.info(f"AI Provider: {ai_manager.AI_PROVIDER}")
     logger.info(f"List ID: {TWITTER_LIST_ID}")
     logger.info(f"Filtre: Akıllı (engagement rate + RT ratio) | Max Age: {MAX_TWEET_AGE_HOURS}h | AI Batch: {AI_BATCH_SIZE}")
