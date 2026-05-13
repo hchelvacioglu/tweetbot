@@ -94,7 +94,7 @@ def _first_sentence(text: str, max_chars: int = 140) -> str:
 
 def _normalize_headline(text: str) -> str:
     """Türkçe ek apostrofunu soy (Torreira'ya → Torreira), noktalamayı temizle."""
-    text = re.sub(r"['’`][\w]+", '', text)  # 'ya 'de 'nın vb. soy
+    text = re.sub(r"[\x27\u2018\u2019\x60]\w+", '', text)  # apostrof+ek soy
     text = re.sub(r'[^\w\s]', '', text)
     return text.lower()
 
@@ -109,9 +109,9 @@ def _jaccard(a: str, b: str) -> float:
 
 
 def _named_entities(text: str) -> set:
-    """Ardışık büyük harfli 2+ kelimeli özel isimleri döner (Lucas Torreira vb.)."""
-    # Önce ekleri soy, sonra orijinal büyük harf bilgisini koru
-    cleaned = re.sub(r"['’`][\w]+", '', text)
+    """Ardışık büyük harfli kelimelerin tüm 2-gram'larını döner.
+    'Lucas Torreira AVM' → {'Lucas Torreira', 'Torreira AVM'} → 'Lucas Torreira' eşleşmesi çalışır."""
+    cleaned = re.sub(r"[\x27\u2018\u2019\x60]\w+", '', text)
     words = re.sub(r'[^\w\s]', '', cleaned).split()
     entities, i = set(), 0
     while i < len(words):
@@ -119,8 +119,10 @@ def _named_entities(text: str) -> set:
             j = i + 1
             while j < len(words) and words[j] and words[j][0].isupper():
                 j += 1
-            if j - i >= 2:
-                entities.add(' '.join(words[i:j]))
+            seq = words[i:j]
+            # Tüm 2-kelimeli pencereler
+            for k in range(len(seq) - 1):
+                entities.add(f"{seq[k]} {seq[k+1]}")
             i = j
         else:
             i += 1
@@ -685,14 +687,19 @@ def hourly_summary_job():
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.cursor()
+        # Atılan değil, TOPLANAN havuzdan çek (daha geniş aday havuzu)
+        # content_hash GROUP BY ile aynı içerik tekrar işlenmesin
         cursor.execute(
             """
-            SELECT id, tweet_content, posted_at
+            SELECT id, tweet_content, created_at
             FROM Bekleyen_Tweetler
-            WHERE status = 'Paylasildi'
-              AND posted_at >= ?
-            ORDER BY posted_at DESC
-            LIMIT 12
+            WHERE created_at >= ?
+              AND tweet_content IS NOT NULL
+              AND tweet_content != ''
+              AND status NOT IN ('Iptal')
+            GROUP BY content_hash
+            ORDER BY created_at DESC
+            LIMIT 30
             """,
             (one_hour_ago.strftime('%Y-%m-%d %H:%M:%S'),),
         )
@@ -701,10 +708,10 @@ def hourly_summary_job():
         conn.close()
 
     if len(rows) < 3:
-        logger.info(f"[Summary] Son 1 saatte {len(rows)} tweet — yetersiz (min 3), kart atılmadı")
+        logger.info(f"[Summary] Son 1 saatte {len(rows)} aday — yetersiz (min 3), kart atılmadı")
         return
 
-    logger.info(f"[Summary] {len(rows)} tweet için kart hazırlanıyor...")
+    logger.info(f"[Summary] {len(rows)} aday tweet işleniyor (haber filtresi + dedup sonrası 3-6 kart)...")
 
     news_items = []
     for row in rows:
