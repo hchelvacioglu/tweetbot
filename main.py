@@ -92,6 +92,57 @@ def _first_sentence(text: str, max_chars: int = 140) -> str:
         return cut[:last_space].rstrip() + "..."
     return cut.rstrip() + "..."
 
+def _normalize_headline(text: str) -> str:
+    """Türkçe ek apostrofunu soy (Torreira'ya → Torreira), noktalamayı temizle."""
+    text = re.sub(r"['’`][\w]+", '', text)  # 'ya 'de 'nın vb. soy
+    text = re.sub(r'[^\w\s]', '', text)
+    return text.lower()
+
+
+def _jaccard(a: str, b: str) -> float:
+    stop = {'ve', 'ile', 'için', 'bir', 'bu', 'da', 'de', 'den', 'dan', 'ın', 'un', 'ün', 'a', 'e'}
+    sa = set(_normalize_headline(a).split()) - stop
+    sb = set(_normalize_headline(b).split()) - stop
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def _named_entities(text: str) -> set:
+    """Ardışık büyük harfli 2+ kelimeli özel isimleri döner (Lucas Torreira vb.)."""
+    # Önce ekleri soy, sonra orijinal büyük harf bilgisini koru
+    cleaned = re.sub(r"['’`][\w]+", '', text)
+    words = re.sub(r'[^\w\s]', '', cleaned).split()
+    entities, i = set(), 0
+    while i < len(words):
+        if words[i] and words[i][0].isupper():
+            j = i + 1
+            while j < len(words) and words[j] and words[j][0].isupper():
+                j += 1
+            if j - i >= 2:
+                entities.add(' '.join(words[i:j]))
+            i = j
+        else:
+            i += 1
+    return entities
+
+
+def _is_same_story(a: str, b: str) -> bool:
+    """Jaccard > 0.25 VEYA aynı 2+ kelimeli özel isim → aynı haber."""
+    if _jaccard(a, b) >= 0.25:
+        return True
+    return bool(_named_entities(a) & _named_entities(b))
+
+
+def _deduplicate_news(items: list) -> list:
+    """Aynı olayı anlatan başlıkları filtrele, her olaydan en iyi birini tut."""
+    kept = []
+    for item in items:
+        if not any(_is_same_story(item["headline"], k["headline"]) for k in kept):
+            kept.append(item)
+    return kept
+
+
 def parse_tweet_date(date_str: str):
     if not date_str:
         return None
@@ -641,7 +692,7 @@ def hourly_summary_job():
             WHERE status = 'Paylasildi'
               AND posted_at >= ?
             ORDER BY posted_at DESC
-            LIMIT 6
+            LIMIT 12
             """,
             (one_hour_ago.strftime('%Y-%m-%d %H:%M:%S'),),
         )
@@ -670,8 +721,11 @@ def hourly_summary_job():
         except Exception as e:
             logger.warning(f"[Summary] Başlık çıkarma hata (id={row['id']}): {e}")
 
+    news_items = _deduplicate_news(news_items)
+    news_items = news_items[:6]
+
     if len(news_items) < 3:
-        logger.warning(f"[Summary] Başlık çıkarma sonrası {len(news_items)} kaldı, kart atılmadı")
+        logger.warning(f"[Summary] Dedup sonrası {len(news_items)} haber kaldı, kart atılmadı")
         return
 
     time_range = f"{one_hour_ago.strftime('%H:00')} - {now.strftime('%H:00')}"
