@@ -423,6 +423,8 @@ def summarize_for_card(tweet_text: str, max_chars: int = 80) -> str:
     Tweet metnini saatlik özet kartı için başlığa dönüştürür.
     Haber niteliğinde değilse (görüş, tebrik, reaksiyon) None döner.
     Her zaman nokta ile biter.
+    max_chars = görsel hard limit. AI'ye soft_limit (max_chars - 15) hedefi verilir,
+    böylece AI rahat yazar; trim sadece görsel limit aşılırsa devreye girer.
     """
     if not tweet_text:
         return None
@@ -434,47 +436,83 @@ def summarize_for_card(tweet_text: str, max_chars: int = 80) -> str:
     if not cleaned:
         return None
 
+    soft_limit = max(40, max_chars - 15)
+
     prompt = (
         f"Aşağıdaki tweet bir futbol haberi mi yoksa kişisel görüş/tebrik/taziye/reaksiyon mu?\n\n"
         f"Eğer haber DEĞİLSE (örn. 'geçmiş olsun', 'tebrikler', 'bence', kişisel yorum): "
         f"SADECE 'HABER_DEGIL' yaz.\n\n"
-        f"Eğer habersa: Türkçe, {max_chars} karakterden kısa, nokta ile biten bir başlık yaz. "
-        f"Açıklama yok, sadece başlık.\n\n"
-        f"Tweet:\n{cleaned}\n\nYanıt:"
+        f"Eğer habersa: Türkçe, HEDEF {soft_limit} KARAKTER (kesinlikle {max_chars}'i aşma), "
+        f"FİİL ile biten ve nokta ile kapanan TAM CÜMLE bir başlık yaz. "
+        f"ÖNEMLİ: cümle yarım kalmasın, fiil ile bitsin, '...' KULLANMA. "
+        f"Çok uzunsa kısalt — detayları çıkar, ana eylemi koru. "
+        f"KESİNLİKLE JSON, kod, süslü parantez, tırnak, etiket veya format kullanma. "
+        f"Sadece düz Türkçe cümle yaz. Açıklama yok, sadece başlık.\n\n"
+        f"Tweet:\n{cleaned}\n\nBaşlık:"
     )
 
     try:
         response = _call_llm(prompt)
         if not response:
-            return _fallback_headline(cleaned, max_chars)
+            return _trim_to_word_boundary(cleaned, max_chars)
         result = response.strip().strip('"').strip("'").split('\n')[0].strip()
         if result.upper() == "HABER_DEGIL":
             logger.info(f"summarize_for_card: haber değil, atlandı — {cleaned[:60]}")
             return None
+        # JSON / kod tortusunu temizle: "baslik": "..." pattern'ini parse et veya at
+        result = _clean_json_artifacts(result)
+        if not result or len(result) < 10:
+            logger.warning(f"summarize_for_card: AI bozuk çıktı verdi, atlandı — {cleaned[:60]}")
+            return None
+        # Hard limit aşıldıysa uyarı logla + kelime sınırında kes
+        if len(result) > max_chars:
+            logger.warning(f"AI başlığı {len(result)} char (>>{max_chars}), trim ediliyor: {result}")
+            result = _trim_to_word_boundary(result, max_chars)
         # Nokta garantisi
         if result and result[-1] not in '.!?':
             result += '.'
-        if len(result) > max_chars + 10:
-            result = result[:max_chars].rstrip().rstrip('.') + '...'
         return result
     except Exception as e:
         logger.warning(f"summarize_for_card hata: {e}, fallback")
-        return _fallback_headline(cleaned, max_chars)
+        return _trim_to_word_boundary(cleaned, max_chars)
 
 
-def _fallback_headline(text: str, max_chars: int) -> str:
-    """AI başarısız olduğunda kelime sınırında kes ve nokta ekle."""
+def _clean_json_artifacts(text: str) -> str:
+    """AI yanıtı JSON/kod formatında geldiyse içeriği çıkar veya atla."""
+    if not text:
+        return text
+    s = text.strip()
+    # {"baslik": "X"} veya benzer JSON wrapper
+    if s.startswith('{') or s.startswith('['):
+        m = re.search(r'"([^"]{10,})"', s)
+        if m:
+            return m.group(1).strip()
+        return ""  # parse edilemez → bozuk
+    # Süslü parantez, köşeli parantez ya da JSON key kalıntısı içerikte ise temizle
+    s = re.sub(r'^[\{\[\}\]"\s,:]+', '', s)
+    s = re.sub(r'["\{\}\[\]]+$', '', s)
+    if any(tok in s.lower() for tok in ['"baslik"', '"title"', '"headline"', '```']):
+        return ""
+    return s.strip()
+
+
+def _trim_to_word_boundary(text: str, max_chars: int) -> str:
+    """Metni max_chars'tan kısa kelime sınırında keser ve nokta ile bitirir. '...' kullanmaz."""
+    if not text:
+        return text
     if len(text) <= max_chars:
-        result = text.rstrip()
-        if result and result[-1] not in '.!?':
-            result += '.'
-        return result
-    cut = text[:max_chars]
+        result = text.rstrip().rstrip('.,;:!?')
+        return result + '.'
+    cut = text[:max_chars].rstrip()
     last_space = cut.rfind(' ')
     if last_space > max_chars // 2:
         result = cut[:last_space].rstrip()
     else:
         result = cut.rstrip()
-    if result and result[-1] not in '.!?':
-        result += '...'
-    return result
+    result = result.rstrip('.,;:!?')
+    return result + '.'
+
+
+def _fallback_headline(text: str, max_chars: int) -> str:
+    """Legacy alias — _trim_to_word_boundary'e yönlendir."""
+    return _trim_to_word_boundary(text, max_chars)

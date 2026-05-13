@@ -683,57 +683,65 @@ def hourly_summary_job():
 
     one_hour_ago = now - datetime.timedelta(hours=1)
 
-    conn = sqlite3.connect(database.DB_NAME)
-    conn.row_factory = sqlite3.Row
-    try:
-        cursor = conn.cursor()
-        # Atılan değil, TOPLANAN havuzdan çek (daha geniş aday havuzu)
-        # content_hash GROUP BY ile aynı içerik tekrar işlenmesin
-        cursor.execute(
-            """
-            SELECT id, tweet_content, created_at
-            FROM Bekleyen_Tweetler
-            WHERE created_at >= ?
-              AND tweet_content IS NOT NULL
-              AND tweet_content != ''
-              AND status NOT IN ('Iptal')
-            GROUP BY content_hash
-            ORDER BY created_at DESC
-            LIMIT 30
-            """,
-            (one_hour_ago.strftime('%Y-%m-%d %H:%M:%S'),),
-        )
-        rows = cursor.fetchall()
-    finally:
-        conn.close()
-
-    if len(rows) < 3:
-        logger.info(f"[Summary] Son 1 saatte {len(rows)} aday — yetersiz (min 3), kart atılmadı")
-        return
-
-    logger.info(f"[Summary] {len(rows)} aday tweet işleniyor (haber filtresi + dedup sonrası 3-6 kart)...")
-
-    news_items = []
-    for row in rows:
+    def _fetch_candidates(hours_back):
+        cutoff = now - datetime.timedelta(hours=hours_back)
+        conn = sqlite3.connect(database.DB_NAME)
+        conn.row_factory = sqlite3.Row
         try:
-            raw = row["tweet_content"] or ""
-            headline = ai_manager.summarize_for_card(raw, max_chars=80)
-            if not headline:  # None → haber değil veya boş
-                continue
-            desc_raw = re.sub(r'https?://\S+', '', raw).strip()
-            desc_raw = re.sub(r'[\U00010000-\U0010ffff]', '', desc_raw)
-            desc_raw = re.sub(r'\s+', ' ', desc_raw).strip()
-            desc = _first_sentence(desc_raw, max_chars=140)
-            news_items.append({"headline": headline, "desc": desc})
-        except Exception as e:
-            logger.warning(f"[Summary] Başlık çıkarma hata (id={row['id']}): {e}")
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, tweet_content, created_at
+                FROM Bekleyen_Tweetler
+                WHERE created_at >= ?
+                  AND tweet_content IS NOT NULL
+                  AND tweet_content != ''
+                  AND status NOT IN ('Iptal')
+                GROUP BY content_hash
+                ORDER BY created_at DESC
+                LIMIT 60
+                """,
+                (cutoff.strftime('%Y-%m-%d %H:%M:%S'),),
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
 
-    news_items = _deduplicate_news(news_items)
-    news_items = news_items[:6]
+    def _process_rows(rows):
+        items = []
+        for row in rows:
+            try:
+                raw = row["tweet_content"] or ""
+                headline = ai_manager.summarize_for_card(raw, max_chars=80)
+                if not headline:
+                    continue
+                desc_raw = re.sub(r'https?://\S+', '', raw).strip()
+                desc_raw = re.sub(r'[\U00010000-\U0010ffff]', '', desc_raw)
+                desc_raw = re.sub(r'\s+', ' ', desc_raw).strip()
+                desc = _first_sentence(desc_raw, max_chars=140)
+                items.append({"headline": headline, "desc": desc})
+            except Exception as e:
+                logger.warning(f"[Summary] Başlık çıkarma hata (id={row['id']}): {e}")
+        return _deduplicate_news(items)
+
+    # 1. denemede son 1 saat, 7'den az çıkarsa son 3 saate kadar genişlet
+    rows = _fetch_candidates(1)
+    logger.info(f"[Summary] Son 1 saat: {len(rows)} aday tweet")
+    news_items = _process_rows(rows)
+
+    if len(news_items) < 7:
+        rows = _fetch_candidates(3)
+        logger.info(f"[Summary] Genişletildi — son 3 saat: {len(rows)} aday")
+        news_items = _process_rows(rows)
+
+    news_items = news_items[:8]
 
     if len(news_items) < 3:
         logger.warning(f"[Summary] Dedup sonrası {len(news_items)} haber kaldı, kart atılmadı")
         return
+
+    if len(news_items) < 7:
+        logger.warning(f"[Summary] Hedef 7, bulunan {len(news_items)} — yine de atılıyor")
 
     time_range = f"{one_hour_ago.strftime('%H:00')} - {now.strftime('%H:00')}"
     success, png_path, b64_data = generate_summary_card(news_items, time_range)
@@ -754,7 +762,7 @@ def hourly_summary_job():
 
     tweet_text = f"🏆 SAATLİK ÖZET — {now.strftime('%H:00')}"
     try:
-        result = twitter_manager.post_tweet_with_media(tweet_text, b64_data, media_type="image/png")
+        result = twitter_manager.post_tweet_with_media(tweet_text, b64_data, media_type="image/jpeg")
         if result:
             logger.info(f"[Summary] ✓ Özet kart atıldı: {result.get('data', {}).get('id')}")
         else:
