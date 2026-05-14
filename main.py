@@ -16,6 +16,7 @@ import logging
 import logging.handlers
 import schedule
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from dotenv import load_dotenv
 
@@ -787,17 +788,23 @@ SUMMARY_HOURS_ACTIVE = set(range(11, 24)) | {0}  # Hot Fix 29: 11:00-23:00 + 00:
 
 
 def hourly_summary_job():
-    """Her tam saatte tetiklenir. Son 1 saatin tweet özetini kart olarak hazırlar."""
+    """Hot Fix 33: Her saatin :50'sinde tetiklenir, :00'a kadar hazırlayıp atar.
+    Paralel AI (max 6 worker) + top 12 aday + tam saat hizalama."""
     now = datetime.datetime.now()
+    # Job :50'de tetikleniyor, hedef bir sonraki tam saat (örn. 13:50 → target 14:00)
+    target_time = now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
+    target_hour = target_time.hour
 
-    if now.hour not in SUMMARY_HOURS_ACTIVE:
-        logger.info(f"[Summary] Saat {now.hour}:00 — aktif saat değil, atlandı")
+    if target_hour not in SUMMARY_HOURS_ACTIVE:
+        logger.info(f"[Summary] Hedef saat {target_hour:02d}:00 — aktif saat değil, atlandı")
         return
 
-    one_hour_ago = now - datetime.timedelta(hours=1)
+    logger.info(f"[Summary] {target_hour:02d}:00 kartı hazırlanıyor (job {now.strftime('%H:%M')}'de başladı)")
+
+    one_hour_ago = target_time - datetime.timedelta(hours=1)
 
     def _fetch_candidates(hours_back):
-        cutoff = now - datetime.timedelta(hours=hours_back)
+        cutoff = target_time - datetime.timedelta(hours=hours_back)
         conn = sqlite3.connect(database.DB_NAME)
         conn.row_factory = sqlite3.Row
         try:
@@ -820,21 +827,42 @@ def hourly_summary_job():
         finally:
             conn.close()
 
+    def _process_single_row(row):
+        """Tek satır işle: AI başlık + desc çıkarma. ThreadPoolExecutor altında paralel çağrılır."""
+        try:
+            raw = row["tweet_content"] or ""
+            headline = ai_manager.summarize_for_card(raw, max_chars=80)
+            if not headline:
+                return None
+            desc_raw = re.sub(r'https?://\S+', '', raw).strip()
+            desc_raw = re.sub(r'[\U00010000-\U0010ffff]', '', desc_raw)
+            desc_raw = re.sub(r'\s+', ' ', desc_raw).strip()
+            desc = _first_sentence(desc_raw, max_chars=140)
+            return {"headline": headline, "desc": desc, "_created_at": row["created_at"]}
+        except Exception as e:
+            logger.warning(f"[Summary] Başlık çıkarma hata (id={row['id']}): {e}")
+            return None
+
     def _process_rows(rows):
+        # Top 12 aday — Bekleyen_Tweetler'da engagement field yok; ilk 12 (created_at DESC sıralı)
+        if len(rows) > 12:
+            rows = rows[:12]
+            logger.info(f"[Summary] İlk 12 aday alındı (Bekleyen_Tweetler şemasında engagement yok)")
+
+        # Paralel AI (max 6 worker, OpenRouter rate-limit'e güvenli)
         items = []
-        for row in rows:
-            try:
-                raw = row["tweet_content"] or ""
-                headline = ai_manager.summarize_for_card(raw, max_chars=80)
-                if not headline:
-                    continue
-                desc_raw = re.sub(r'https?://\S+', '', raw).strip()
-                desc_raw = re.sub(r'[\U00010000-\U0010ffff]', '', desc_raw)
-                desc_raw = re.sub(r'\s+', ' ', desc_raw).strip()
-                desc = _first_sentence(desc_raw, max_chars=140)
-                items.append({"headline": headline, "desc": desc})
-            except Exception as e:
-                logger.warning(f"[Summary] Başlık çıkarma hata (id={row['id']}): {e}")
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(_process_single_row, r) for r in rows]
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result:
+                    items.append(result)
+
+        # as_completed sırayı bozar → created_at DESC ile geri sırala (en yeni önce)
+        items.sort(key=lambda x: x.get("_created_at") or "", reverse=True)
+        for item in items:
+            item.pop("_created_at", None)
+
         return _deduplicate_news(items)
 
     # 1. denemede son 1 saat, 7'den az çıkarsa son 3 saate kadar genişlet
@@ -856,7 +884,7 @@ def hourly_summary_job():
     if len(news_items) < 7:
         logger.warning(f"[Summary] Hedef 7, bulunan {len(news_items)} — yine de atılıyor")
 
-    time_range = f"{one_hour_ago.strftime('%H:00')} - {now.strftime('%H:00')}"
+    time_range = f"{one_hour_ago.strftime('%H:00')} - {target_time.strftime('%H:00')}"
     success, jpg_path, public_url = generate_summary_card(news_items, time_range)
 
     if not success:
@@ -871,7 +899,17 @@ def hourly_summary_job():
         logger.error("[Summary] GCS public URL yok, atılamadı")
         return
 
-    tweet_text = f"🏆 {now.strftime('%H:00')} Saatlik Futbol Özeti"
+    # Kart hazır, target_time'a (tam saat başı) kadar bekle
+    wait_seconds = (target_time - datetime.datetime.now()).total_seconds()
+    if 0 < wait_seconds < 600:
+        logger.info(f"[Summary] Kart hazır, {wait_seconds:.0f}s sonra ({target_time.strftime('%H:%M')}) atılacak")
+        time.sleep(wait_seconds)
+    elif wait_seconds >= 600:
+        logger.warning(f"[Summary] Beklenmedik uzun bekleme ({wait_seconds:.0f}s), bekleme atlanıyor — hemen at")
+    elif wait_seconds < -300:
+        logger.warning(f"[Summary] Hedef saat {abs(wait_seconds):.0f}s geçmiş, geç ama atıyorum")
+
+    tweet_text = f"🏆 {target_time.strftime('%H:00')} Saatlik Futbol Özeti"
     try:
         result = twitter_manager.post_tweet_with_media_url(tweet_text, public_url)
         if result:
@@ -911,8 +949,8 @@ if __name__ == "__main__":
     # Engagement tracker geçici olarak kapatıldı (takipçi sayısı düşükken veri anlamlı değil, GetXAPI maliyeti boşa).
     # Tekrar açmak için aşağıdaki satırı yorumdan çıkar:
     # schedule.every(ENGAGEMENT_INTERVAL_MIN).minutes.do(engagement_tracker_job)
-    # Faz 10 / Hot Fix 25: Saatlik özet kart (her tam saatin :00'ında)
-    schedule.every().hour.at(":00").do(hourly_summary_job)
+    # Faz 10 / Hot Fix 25 + Hot Fix 33: Saatlik özet kart — job :50'de başlar, :00'da atar
+    schedule.every().hour.at(":50").do(hourly_summary_job)
 
     logger.info("İlk collector çağrısı...")
     twitter_collector_job()
