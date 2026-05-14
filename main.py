@@ -57,6 +57,9 @@ PUBLISHER_INTERVAL_MIN = int(os.getenv("PUBLISHER_INTERVAL_MIN", 3))
 ENGAGEMENT_INTERVAL_MIN = int(os.getenv("ENGAGEMENT_INTERVAL_MIN", 60))
 AI_BATCH_SIZE = int(os.getenv("AI_BATCH_SIZE", 5))  # Faz 2: 10 → 5 (truncation çözümü)
 
+# Hot Fix 31: Uzun tweet eşiği — bu üstündeyse URL başa alınır (kart açma garantisi)
+TWEET_LONG_THRESHOLD = 220
+
 _ai_quota_blocked_until = None
 # AI'ın ATLA dediği tweet hash'leri — aynı tweet'i tekrar AI'a yollamayalım
 _atlanan_hashes = set()
@@ -656,7 +659,11 @@ def twitter_collector_job():
                     video_url = expanded.split('?')[0]
                 else:
                     video_url = twitter_manager.make_video_embed_url(tweet_url)
-                full_text = f"{base_text}\n{video_url}"
+                # Hot Fix 31: 220+ karakterli tweet'lerde URL başa, kısa olanlarda sonda
+                if len(base_text) >= TWEET_LONG_THRESHOLD:
+                    full_text = f"{video_url}\n{base_text}"
+                else:
+                    full_text = f"{base_text}\n{video_url}"
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
                     tweet_content=full_text,
@@ -671,7 +678,11 @@ def twitter_collector_job():
                     photo_url = expanded.split('?')[0]
                 else:
                     photo_url = twitter_manager.make_photo_embed_url(tweet_url)
-                full_text = f"{base_text}\n{photo_url}"
+                # Hot Fix 31: 220+ karakterli tweet'lerde URL başa, kısa olanlarda sonda
+                if len(base_text) >= TWEET_LONG_THRESHOLD:
+                    full_text = f"{photo_url}\n{base_text}"
+                else:
+                    full_text = f"{base_text}\n{photo_url}"
                 ok = database.add_pending_tweet(
                     title=res['title'], link=res['link'], published_date=res['published_date'],
                     tweet_content=full_text,
@@ -897,7 +908,9 @@ if __name__ == "__main__":
 
     schedule.every(COLLECTOR_INTERVAL_MIN).minutes.do(twitter_collector_job)
     schedule.every(PUBLISHER_INTERVAL_MIN).minutes.do(publisher_job)
-    schedule.every(ENGAGEMENT_INTERVAL_MIN).minutes.do(engagement_tracker_job)
+    # Engagement tracker geçici olarak kapatıldı (takipçi sayısı düşükken veri anlamlı değil, GetXAPI maliyeti boşa).
+    # Tekrar açmak için aşağıdaki satırı yorumdan çıkar:
+    # schedule.every(ENGAGEMENT_INTERVAL_MIN).minutes.do(engagement_tracker_job)
     # Faz 10 / Hot Fix 25: Saatlik özet kart (her tam saatin :00'ında)
     schedule.every().hour.at(":00").do(hourly_summary_job)
 

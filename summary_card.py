@@ -1,10 +1,9 @@
 """
 Saatlik özet kartı oluşturma modülü.
-HTML template + Playwright ile JPEG screenshot.
-1280x720 + Pillow ile adaptive quality (GetXAPI ~100KB base64 limitine sığar).
+HTML template + Playwright retina screenshot (1280x720 @ scale=2 → 2560x1440).
+GCS public bucket'a yüklenir, public URL döndürülür (GetXAPI media_urls için).
 """
 
-import base64
 import io
 import logging
 import asyncio
@@ -16,9 +15,14 @@ logger = logging.getLogger(__name__)
 TEST_CARDS_DIR = Path("/home/hch7/test_cards")
 TEST_CARDS_DIR.mkdir(parents=True, exist_ok=True)
 
-# GetXAPI ~100KB base64 limit. 95KB binary ≈ 127KB base64, üstünde.
-# Güvenli hedef: 70KB binary ≈ 94KB base64.
-TARGET_BINARY_BYTES = 70_000
+GCS_BUCKET = "flasbot-hch7-cards"
+GCS_PUBLIC_URL_BASE = f"https://storage.googleapis.com/{GCS_BUCKET}"
+
+# GetXAPI media_urls ile 5MB JPEG/PNG limit (Twitter native). Kalite öncelikli.
+JPEG_QUALITY = 92
+# subsampling=0 (4:4:4) renk bilgisini düşürmez — keskin metin kenarları için kritik.
+# Varsayılan 4:2:0 metin etrafında "renkli halo" yaratır.
+JPEG_SUBSAMPLING = 0
 
 ACCENT_COLORS = ["#4a9eff", "#ff6b35", "#aaaaaa", "#ff4d94", "#ffd700", "#4a9eff"]
 
@@ -35,24 +39,12 @@ HTML_TEMPLATE = """\
   body {{
     width: 1280px;
     height: 720px;
-    background: linear-gradient(160deg, #0d1117 0%, #0f1f16 100%);
+    background: #000000;
     color: #ffffff;
     font-family: 'Inter', sans-serif;
     padding: 32px 56px 32px 56px;
     position: relative;
     overflow: hidden;
-  }}
-
-  /* sağ üst yeşil parıltı */
-  body::before {{
-    content: '';
-    position: absolute;
-    top: -100px;
-    right: -100px;
-    width: 500px;
-    height: 500px;
-    background: radial-gradient(circle, rgba(0,200,100,0.12) 0%, transparent 68%);
-    pointer-events: none;
   }}
 
   /* ======= HEADER ======= */
@@ -65,7 +57,7 @@ HTML_TEMPLATE = """\
     font-size: 13px;
     font-weight: 600;
     letter-spacing: 4px;
-    color: #5a6a5a;
+    color: #808080;
     text-transform: uppercase;
     margin-bottom: 5px;
   }}
@@ -88,7 +80,7 @@ HTML_TEMPLATE = """\
   .header-date {{
     font-size: 22px;
     font-weight: 600;
-    color: #6a7a6a;
+    color: #909090;
     display: block;
     margin-bottom: 4px;
   }}
@@ -102,7 +94,7 @@ HTML_TEMPLATE = """\
   .divider {{
     width: 100%;
     height: 1px;
-    background: #2a3a2a;
+    background: #2a2a2a;
     margin: 16px 0 14px 0;
   }}
 
@@ -118,7 +110,7 @@ HTML_TEMPLATE = """\
     align-items: flex-start;
     padding-bottom: 7px;
     margin-bottom: 7px;
-    border-bottom: 1px solid #1a2a1a;
+    border-bottom: 1px solid #1f1f1f;
   }}
 
   .news-item:last-child {{
@@ -131,14 +123,14 @@ HTML_TEMPLATE = """\
     min-width: 30px;
     height: 30px;
     border-radius: 50%;
-    background: #1a2a1a;
-    border: 1px solid #2a3a2a;
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 13px;
     font-weight: 700;
-    color: #5a6a5a;
+    color: #909090;
     margin-top: 2px;
     flex-shrink: 0;
   }}
@@ -171,7 +163,7 @@ HTML_TEMPLATE = """\
   .desc {{
     font-size: 14px;
     font-weight: 400;
-    color: #5a6a5a;
+    color: #909090;
     line-height: 1.3;
     white-space: nowrap;
     overflow: hidden;
@@ -189,8 +181,8 @@ HTML_TEMPLATE = """\
     align-items: center;
     font-size: 13px;
     font-weight: 500;
-    color: #3a4a3a;
-    border-top: 1px solid #1e2e1e;
+    color: #707070;
+    border-top: 1px solid #1f1f1f;
     padding-top: 8px;
   }}
 
@@ -254,7 +246,7 @@ def _build_html(time_label: str, date_label: str, news_items: list) -> str:
 
 
 async def _render_to_image(html: str, output_path: Path) -> bool:
-    """Önce PNG olarak render et — Pillow ile adaptive JPEG'e çevireceğiz."""
+    """Retina render (2x scale) + yüksek kalite JPEG. Boyut limit yok (GCS host)."""
     try:
         from playwright.async_api import async_playwright
 
@@ -262,60 +254,62 @@ async def _render_to_image(html: str, output_path: Path) -> bool:
             browser = await p.chromium.launch()
             page = await browser.new_page(
                 viewport={"width": 1280, "height": 720},
-                device_scale_factor=1,
+                device_scale_factor=2,
             )
             await page.set_content(html, wait_until="networkidle")
             await page.wait_for_timeout(600)
-            # Önce kayıpsız PNG buffer'a al
             png_bytes = await page.screenshot(full_page=False, type="png")
             await browser.close()
 
-        # Pillow ile adaptive JPEG sıkıştırma: en yüksek quality ile hedef boyuta in
         from PIL import Image
 
         img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-
-        # Binary search: hedef ≤ TARGET_BINARY_BYTES, q ∈ [30, 92]
-        lo, hi = 30, 92
-        best_q, best_bytes = 30, None
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=mid, optimize=True, progressive=True)
-            size = buf.tell()
-            if size <= TARGET_BINARY_BYTES:
-                best_q, best_bytes = mid, buf.getvalue()
-                lo = mid + 1  # daha yüksek q'yu dene
-            else:
-                hi = mid - 1
-
-        if best_bytes is None:
-            # Hedefe sığmadı, en düşük q ile zorla yaz
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=30, optimize=True, progressive=True)
-            best_bytes = buf.getvalue()
-            best_q = 30
-            logger.warning(f"Adaptive JPEG hedefe sığmadı, q=30 forced (size={len(best_bytes)})")
-
-        output_path.write_bytes(best_bytes)
-        logger.info(f"Adaptive JPEG: q={best_q}, binary={len(best_bytes)} bytes")
+        buf = io.BytesIO()
+        img.save(
+            buf,
+            format="JPEG",
+            quality=JPEG_QUALITY,
+            optimize=True,
+            progressive=True,
+            subsampling=JPEG_SUBSAMPLING,
+        )
+        data = buf.getvalue()
+        output_path.write_bytes(data)
+        logger.info(f"JPEG render: {img.size[0]}x{img.size[1]} q={JPEG_QUALITY} sub=4:4:4 size={len(data)} bytes")
         return True
     except Exception as e:
         logger.error(f"JPEG render hatası: {e}")
         return False
 
 
+def _upload_to_gcs(local_path: Path) -> str:
+    """JPEG'i public GCS bucket'a yükle, public URL döndür. Hata olursa None."""
+    try:
+        from google.cloud import storage
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        object_name = local_path.name  # örn. summary_20260513_204500.jpg
+        blob = bucket.blob(object_name)
+        blob.upload_from_filename(str(local_path), content_type="image/jpeg")
+        url = f"{GCS_PUBLIC_URL_BASE}/{object_name}"
+        logger.info(f"✓ GCS upload: {url}")
+        return url
+    except Exception as e:
+        logger.error(f"GCS upload hatası: {e}")
+        return None
+
+
 def generate_summary_card(news_items: list, time_range: str, save_path: Path = None) -> tuple:
     """
-    Saatlik özet kartı üret. Landscape 1600x900.
+    Saatlik özet kartı üret + GCS'e yükle.
 
     Args:
-        news_items: 3-6 arası {"headline": str, "desc": str} dict listesi
+        news_items: 3-8 arası {"headline": str, "desc": str} dict listesi
         time_range: "20:00 - 21:00" gibi string
-        save_path: PNG kayıt yolu (test mode için)
+        save_path: JPG kayıt yolu (test mode için)
 
     Returns:
-        (success: bool, png_path: Path or None, base64_data: str or None)
+        (success: bool, jpg_path: Path or None, public_url: str or None)
     """
     if not news_items or len(news_items) < 3:
         logger.warning(f"Yetersiz haber ({len(news_items)}), kart üretilmedi")
@@ -341,12 +335,9 @@ def generate_summary_card(news_items: list, time_range: str, save_path: Path = N
     if not success:
         return (False, None, None)
 
-    try:
-        with open(save_path, "rb") as f:
-            b64_data = base64.b64encode(f.read()).decode("utf-8")
-    except Exception as e:
-        logger.error(f"Base64 encode hatası: {e}")
+    public_url = _upload_to_gcs(save_path)
+    if not public_url:
         return (True, save_path, None)
 
-    logger.info(f"✓ Kart üretildi: {save_path} ({len(b64_data)} char base64)")
-    return (True, save_path, b64_data)
+    logger.info(f"✓ Kart hazır: {save_path} → {public_url}")
+    return (True, save_path, public_url)

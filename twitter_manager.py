@@ -87,7 +87,7 @@ def get_list_tweets(list_id: str, count: int = 60) -> List[Dict]:
     Hedef tweet sayısına ulaşana kadar veya max sayfaya kadar döner.
     Dedup uygulanır (aynı tweet_id 2x gelirse atılır).
     """
-    MAX_PAGES = 3
+    MAX_PAGES = 5
     all_tweets = []
     seen_ids = set()
     cursor = None
@@ -292,6 +292,43 @@ def post_quote_tweet(text: str, quote_url: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"post_quote_tweet network error: {e}")
         return False
+
+
+def post_tweet_with_media_url(text: str, media_url: str) -> dict:
+    """
+    Tweet at + medyayı public URL üzerinden Twitter'a yükle. GetXAPI media_urls field'ı kullanır.
+    Twitter native limit: 5MB JPEG/PNG, 15MB GIF (base64 inline'ın çok üstünde).
+
+    Args:
+        text: Tweet metni
+        media_url: Public ulaşılabilir görsel/video URL'si
+
+    Returns:
+        GetXAPI response dict veya None
+    """
+    url = f"{GETXAPI_BASE_URL}/twitter/tweet/create"
+    payload = {
+        "auth_token": os.getenv("X_AUTH_TOKEN"),
+        "text": text,
+        "media_urls": [media_url],
+    }
+
+    logger.info(f"Posting tweet with media_url ({media_url}): {text[:80]}")
+
+    try:
+        response = requests.post(url, headers=_get_headers(), json=payload, timeout=60)
+
+        if response.status_code == 200:
+            data = response.json()
+            tweet_id = data.get("data", {}).get("id")
+            logger.info(f"✓ Tweet with media_url posted! ID: {tweet_id}")
+            return data
+        else:
+            logger.error(f"post_tweet_with_media_url failed | status={response.status_code} | body={response.text[:200]}")
+            return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"post_tweet_with_media_url network error: {e}")
+        return None
 
 
 def post_tweet_with_media(text: str, media_base64: str, media_type: str = "image/png") -> dict:

@@ -178,13 +178,13 @@ def _call_gemini(prompt: str) -> str:
             last_err = e
             error_class = _classify_error(err_str)
             if error_class is AIQuotaExceeded:
-                logger.error(f"Gemini quota exceeded: {err_str[:200]}")
+                logger.warning(f"Gemini quota exceeded: {err_str[:200]}")
                 raise AIQuotaExceeded(err_str) from e
             if error_class is AIPromptTooLarge:
-                logger.error(f"Gemini 413 prompt too large: {err_str[:200]}")
+                logger.warning(f"Gemini 413 prompt too large: {err_str[:200]}")
                 raise AIPromptTooLarge(err_str) from e
             if error_class is AIModelDeprecated:
-                logger.error(f"Gemini model deprecated: {err_str[:200]}")
+                logger.warning(f"Gemini model deprecated: {err_str[:200]}")
                 raise AIModelDeprecated(err_str) from e
             # Diğer (transient veya unknown): retry yap
             logger.warning(f"Gemini error attempt {attempt+1}: {err_str[:200]}")
@@ -311,22 +311,34 @@ def _call_llm(prompt: str) -> str:
 # Prompt — Faz 8 (Sadece PAYLAS/ATLA — metin üretme yok)
 # ============================================================
 
-SYSTEM_PROMPT = """Sen Türk futbolu odaklı bir filtreleme asistanısın.
+SYSTEM_PROMPT = """Sen Türk **FUTBOL** odaklı bir filtreleme asistanısın.
 Sana 4 büyük takım (Galatasaray, Fenerbahçe, Beşiktaş, Trabzonspor) ile ilgili tweet'ler verilecek.
 
 Her tweet için sadece KARAR vereceksin:
-- "PAYLAS": Somut transfer haberi, açıklama, maç sonucu, sakatlık, başkanlık, yönetim, gerçek bir bilgi içeren haber
-- "ATLA": Eğlence, troll, sıradan yorum, futbol dışı konu, hakaret, anlamsız metin
 
-ÖNEMLİ KURALLAR:
+"PAYLAS": Somut futbol haberi — transfer, açıklama, maç sonucu, sakatlık, başkanlık, kadro, antrenman raporu, hakem kararı, federasyon kararı.
+
+"ATLA":
+1) Sadece mizah/eğlence amaçlı VE haber değeri OLMAYAN içerik
+2) Troll, sıradan yorum
+3) Futbol DIŞI haberler:
+   - Basketbol: "Fenerbahçe Beko", "Anadolu Efes", "Galatasaray Nef", "Beşiktaş Basketbol", "Real Madrid Basket", "Final Four", "Euroleague", "BSL", "NBA"
+   - Voleybol, hentbol, yüzme, atletizm, futsal
+4) Nostalji içerikleri:
+   - "Tarihte bugün", "geçmiş şampiyonluk", "yıldönümü", "anma"
+   - Eski maçların hatıraları, eski oyuncu retrospektifi
+5) Kulüp resmi hesabının (örn. @GalatasaraySK) kutlama/anma paylaşımları (haber içerikleri PAYLAS kalır)
+
+YENİ KURAL:
+- Eğlenceli/mizahi içerik FUTBOL gündemiyle ilgili bir olay ya da bilgi içeriyorsa PAYLAS'tır.
+- "Fenerbahçe Beko" kelimesini görürsen kesinlikle ATLA — bu basketbol.
+
+ÖNEMLİ:
 - Tweet metnini değiştirme, özetleme, yeniden yazma. Sadece karar ver.
 - Sadece JSON dizisi yanıt ver, başka açıklama YAZMA.
 
 Yanıt formatı:
-[
-  {"id": 0, "decision": "PAYLAS"},
-  {"id": 1, "decision": "ATLA"}
-]"""
+[{"id": 0, "decision": "PAYLAS"}, {"id": 1, "decision": "ATLA"}]"""
 
 
 def build_user_prompt(candidates: List[Dict]) -> str:
@@ -400,21 +412,27 @@ def process_news_batch(news_items: List[Dict], recent_titles: List[str]) -> List
         return []
 
     processed = []
+    atla_count = 0
     for res in results:
         idx = res.get("id")
         decision = (res.get("decision") or "").upper()
         if idx is None or idx >= len(news_items):
             continue
+        item = news_items[idx]
+        snippet = (item.get('title') or '')[:80]
         if decision in ("PAYLAS", "PAYLAŞ"):
-            item = news_items[idx]
+            logger.info(f"AI ✓ PAYLAS: {snippet}")
             processed.append({
                 "idx": idx,
                 "title": item['title'],
                 "link": item['link'],
                 "published_date": item.get('published_date', time.strftime('%Y-%m-%d %H:%M:%S'))
             })
+        else:
+            logger.info(f"AI ✗ ATLA: {snippet}")
+            atla_count += 1
 
-    logger.info(f"AI batch: {len(news_items)} işlendi, {len(processed)} paylaşılacak.")
+    logger.info(f"AI batch: {len(news_items)} işlendi, {len(processed)} paylaşılacak, {atla_count} atlandı.")
     return processed
 
 
