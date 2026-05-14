@@ -661,7 +661,7 @@ def twitter_collector_job():
                     video_url = twitter_manager.make_video_embed_url(tweet_url)
                 # Hot Fix 31: 220+ karakterli tweet'lerde URL başa, kısa olanlarda sonda
                 if len(base_text) >= TWEET_LONG_THRESHOLD:
-                    full_text = f"{video_url}\n{base_text}"
+                    full_text = f"{video_url} {base_text}"
                 else:
                     full_text = f"{base_text}\n{video_url}"
                 ok = database.add_pending_tweet(
@@ -680,7 +680,7 @@ def twitter_collector_job():
                     photo_url = twitter_manager.make_photo_embed_url(tweet_url)
                 # Hot Fix 31: 220+ karakterli tweet'lerde URL başa, kısa olanlarda sonda
                 if len(base_text) >= TWEET_LONG_THRESHOLD:
-                    full_text = f"{photo_url}\n{base_text}"
+                    full_text = f"{photo_url} {base_text}"
                 else:
                     full_text = f"{base_text}\n{photo_url}"
                 ok = database.add_pending_tweet(
